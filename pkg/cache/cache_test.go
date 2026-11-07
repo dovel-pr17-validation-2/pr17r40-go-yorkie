@@ -1,0 +1,232 @@
+/*
+ * Copyright 2025 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package cache_test
+
+import (
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/yorkie-team/yorkie/pkg/cache"
+)
+
+func TestLRUWithStats(t *testing.T) {
+	t.Run("basic operations", func(t *testing.T) {
+		// Only one key is added, so shard collisions cannot evict
+		// anything; if a second key is ever added here, raise size to
+		// at least 16*N (see the sibling subtest for the reasoning).
+		c, err := cache.NewLRU[string, int](3, "test-cache")
+		assert.NoError(t, err)
+
+		// Test cache miss
+		_, ok := c.Get("key1")
+		assert.False(t, ok)
+		assert.Equal(t, int64(0), c.Stats().Hits())
+		assert.Equal(t, int64(1), c.Stats().Misses())
+
+		// Add and test cache hit
+		c.Add("key1", 100)
+		val, ok := c.Get("key1")
+		assert.True(t, ok)
+		assert.Equal(t, 100, val)
+		assert.Equal(t, int64(1), c.Stats().Hits())
+		assert.Equal(t, int64(1), c.Stats().Misses())
+
+		// Test hit rate
+		assert.Equal(t, 50.0, c.Stats().HitRate())
+	})
+
+	t.Run("hit rate calculation", func(t *testing.T) {
+		// LRU is sharded across 16 shards with per-shard capacity size/16
+		// (floored at 1). With size=5, each shard held one slot, so any
+		// two of the added keys that hashed to the same shard would evict
+		// each other. maphash.MakeSeed randomizes the shard mapping per
+		// process, producing ~18% flake rate. Size 64 gives perShard=4,
+		// enough to hold all three added keys even on worst-case collision.
+		c, err := cache.NewLRU[string, int](64, "test-cache")
+		assert.NoError(t, err)
+
+		// Add some data
+		c.Add("key1", 1)
+		c.Add("key2", 2)
+		c.Add("key3", 3)
+
+		// Generate hits and misses
+		c.Get("key1") // hit
+		c.Get("key2") // hit
+		c.Get("key3") // hit
+		c.Get("key4") // miss
+		c.Get("key5") // miss
+
+		assert.Equal(t, int64(3), c.Stats().Hits())
+		assert.Equal(t, int64(2), c.Stats().Misses())
+		assert.Equal(t, int64(5), c.Stats().Total())
+		assert.Equal(t, 60.0, c.Stats().HitRate())
+	})
+}
+
+func TestLRUConcurrency(t *testing.T) {
+	t.Run("concurrent Get and Add", func(t *testing.T) {
+		c, err := cache.NewLRU[string, int](1024, "concurrent-cache")
+		assert.NoError(t, err)
+
+		const numGoroutines = 100
+		const numOps = 1000
+
+		// Pre-populate half the keys so Gets have a mix of hits and misses.
+		for i := range numOps / 2 {
+			c.Add(fmt.Sprintf("key-%d", i), i)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+		for g := range numGoroutines {
+			go func(id int) {
+				defer wg.Done()
+				for i := range numOps {
+					key := fmt.Sprintf("key-%d", i)
+					if i%2 == 0 {
+						c.Add(key, id*numOps+i)
+					} else {
+						c.Get(key)
+					}
+				}
+			}(g)
+		}
+		wg.Wait()
+
+		// Stats should be consistent: total = hits + misses.
+		stats := c.Stats()
+		assert.Equal(t, stats.Total(), stats.Hits()+stats.Misses())
+		assert.Greater(t, stats.Total(), int64(0))
+	})
+
+	t.Run("concurrent operations on same keys", func(t *testing.T) {
+		c, err := cache.NewLRU[string, int](64, "contention-cache")
+		assert.NoError(t, err)
+
+		const numGoroutines = 50
+		const numOps = 500
+
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+		for range numGoroutines {
+			go func() {
+				defer wg.Done()
+				for i := range numOps {
+					key := fmt.Sprintf("hot-key-%d", i%10)
+					c.Add(key, i)
+					c.Get(key)
+					c.Contains(key)
+					c.Peek(key)
+					c.Remove(key)
+				}
+			}()
+		}
+		wg.Wait()
+
+		// Verify the cache is still functional after heavy contention.
+		c.Add("final", 42)
+		val, ok := c.Get("final")
+		assert.True(t, ok)
+		assert.Equal(t, 42, val)
+	})
+}
+
+func TestLRUWithExpires(t *testing.T) {
+	t.Run("reject TTL below MinTTL", func(t *testing.T) {
+		for _, ttl := range []time.Duration{
+			0,
+			-time.Second,
+			time.Nanosecond,
+			cache.MinTTL - time.Nanosecond,
+		} {
+			c, err := cache.NewLRUWithExpires[string, int](10, ttl, "test")
+			assert.ErrorIs(t, err, cache.ErrInvalidTTL, ttl)
+			assert.Nil(t, c)
+		}
+	})
+
+	t.Run("accept MinTTL and expire entries", func(t *testing.T) {
+		c, err := cache.NewLRUWithExpires[string, int](10, cache.MinTTL, "test")
+		assert.NoError(t, err)
+		c.Add("key", 1)
+		assert.Eventually(t, func() bool {
+			_, ok := c.Get("key")
+			return !ok
+		}, time.Second, cache.MinTTL/10)
+	})
+
+	t.Run("parse TTL against MinTTL", func(t *testing.T) {
+		for _, value := range []string{"0", "0s", "-1s", "1ns", "1ms", "99ms"} {
+			_, err := cache.ParseTTL(value)
+			assert.ErrorIs(t, err, cache.ErrInvalidTTL, value)
+		}
+
+		_, err := cache.ParseTTL("ten seconds")
+		assert.Error(t, err)
+		assert.NotErrorIs(t, err, cache.ErrInvalidTTL)
+
+		ttl, err := cache.ParseTTL("100ms")
+		assert.NoError(t, err)
+		assert.Equal(t, cache.MinTTL, ttl)
+	})
+}
+
+func TestCacheManager(t *testing.T) {
+	t.Run("register and log stats", func(t *testing.T) {
+		manager := cache.NewManager(time.Second)
+
+		cache1, err := cache.NewLRU[string, int](5, "cache1")
+		assert.NoError(t, err)
+		cache2, err := cache.NewLRU[string, string](5, "cache2")
+		assert.NoError(t, err)
+
+		manager.RegisterCache(cache1)
+		manager.RegisterCache(cache2)
+
+		// Add some test data
+		cache1.Add("key1", 1)
+		cache1.Get("key1") // hit
+		cache1.Get("key2") // miss
+
+		cache2.Add("key1", "value1")
+		cache2.Get("key1") // hit
+		cache2.Get("key2") // miss
+
+		// This should log the stats
+		manager.LogCacheStats()
+	})
+}
+
+func TestLRUWithExpiresRemoveIf(t *testing.T) {
+	c, err := cache.NewLRUWithExpires[string, int](10, time.Minute, "expires")
+	assert.NoError(t, err)
+	c.Add("a:1", 1)
+	c.Add("a:2", 2)
+	c.Add("b:1", 3)
+
+	removed := c.RemoveIf(func(key string) bool { return key[0] == 'a' })
+
+	assert.Equal(t, 2, removed)
+	assert.False(t, c.Contains("a:1"))
+	assert.False(t, c.Contains("a:2"))
+	assert.True(t, c.Contains("b:1"))
+}

@@ -1,0 +1,200 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package json
+
+import (
+	"reflect"
+
+	"github.com/yorkie-team/yorkie/pkg/document/change"
+	"github.com/yorkie-team/yorkie/pkg/document/crdt"
+	"github.com/yorkie-team/yorkie/pkg/document/operations"
+)
+
+// Counter represents a counter in the document. As a proxy for the CRDT counter,
+// it is used when the user manipulates the counter from the outside.
+type Counter struct {
+	*crdt.Counter
+	context   *change.Context
+	valueType crdt.CounterType
+	value     any
+}
+
+// NewCounter creates a new instance of Counter.
+func NewCounter(n any, t crdt.CounterType) *Counter {
+	return &Counter{
+		valueType: t,
+		value:     n,
+	}
+}
+
+// Initialize initializes the Counter by the given context and counter.
+func (p *Counter) Initialize(ctx *change.Context, counter *crdt.Counter) *Counter {
+	if !counter.IsNumericType() {
+		panic("unsupported type")
+	}
+	p.Counter = counter
+	p.context = ctx
+
+	return p
+}
+
+// Increase adds an increase operation. Only valid for non-dedup counters.
+// Only numeric types are allowed as operand values, excluding
+// uint64 and uintptr.
+func (p *Counter) Increase(v any) *Counter {
+	if p.Counter.IsDedup() {
+		panic("dedup counter does not support Increase(), use Add(actor)")
+	}
+	if !isAllowedOperand(v) {
+		panic("unsupported type")
+	}
+	var primitive *crdt.Primitive
+	var err error
+	ticket := p.context.IssueTimeTicket()
+
+	value, kind := convertAssertableOperand(v)
+	isInt := kind == reflect.Int
+	// A fractional delta is sent as an integer of the counter's width,
+	// truncated toward zero and wrapped as the JS SDK does. Servers before
+	// this fix cannot build the reverse of a Double delta, and convert it
+	// with a CPU-dependent int32(f), so an integer is what they apply safely.
+	switch p.ValueType() {
+	case crdt.LongCnt:
+		delta := int64(0)
+		if isInt {
+			delta = int64(value.(int))
+		} else {
+			delta, err = crdt.TruncFloatToInt64(value.(float64))
+		}
+		if err == nil {
+			primitive, err = crdt.NewPrimitive(delta, ticket)
+		}
+	case crdt.IntegerCnt, crdt.IntegerDedupCnt:
+		delta := int32(0)
+		if isInt {
+			delta = int32(value.(int))
+		} else {
+			delta, err = crdt.TruncFloatToInt32(value.(float64))
+		}
+		if err == nil {
+			primitive, err = crdt.NewPrimitive(delta, ticket)
+		}
+	default:
+		panic("unsupported type")
+	}
+	if err != nil {
+		panic(err)
+	}
+	if _, err := p.Counter.Increase(primitive); err != nil {
+		panic(err)
+	}
+
+	p.context.Push(operations.NewIncrease(
+		p.CreatedAt(),
+		primitive,
+		ticket,
+	))
+
+	return p
+}
+
+// Add records a unique actor in the dedup counter. If the actor has already
+// been counted, the call is ignored. Only valid for dedup counters.
+func (p *Counter) Add(actor string) *Counter {
+	if actor == "" {
+		panic("actor is required")
+	}
+	if !p.Counter.IsDedup() {
+		panic("Add is only supported on dedup counters")
+	}
+
+	ticket := p.context.IssueTimeTicket()
+
+	var primitive *crdt.Primitive
+	var err error
+	switch p.ValueType() {
+	case crdt.IntegerDedupCnt:
+		primitive, err = crdt.NewPrimitive(int32(1), ticket)
+	default:
+		panic("unsupported dedup counter type")
+	}
+	if err != nil {
+		panic(err)
+	}
+	if _, err := p.Counter.IncreaseDedup(primitive, actor); err != nil {
+		panic(err)
+	}
+
+	p.context.Push(operations.NewIncreaseWithActor(
+		p.CreatedAt(),
+		primitive,
+		ticket,
+		actor,
+	))
+
+	return p
+}
+
+// inferCounterType infers the CounterType from the Go value type.
+// int64 maps to LongCnt; all other numeric types map to IntegerCnt.
+func inferCounterType(v any) crdt.CounterType {
+	if reflect.ValueOf(v).Kind() == reflect.Int64 {
+		return crdt.LongCnt
+	}
+	return crdt.IntegerCnt
+}
+
+// isAllowedOperand indicates whether
+// the operand of increase is an allowable type.
+func isAllowedOperand(v any) bool {
+	vt := reflect.ValueOf(v).Kind()
+	if vt >= reflect.Int && vt <= reflect.Float64 && vt != reflect.Uint64 && vt != reflect.Uintptr {
+		return true
+	}
+
+	return false
+}
+
+// convertAssertableOperand converts the operand
+// to be used in the increase function to assertable type.
+func convertAssertableOperand(v any) (any, reflect.Kind) {
+	vt := reflect.ValueOf(v).Kind()
+	switch vt {
+	case reflect.Int:
+		return v, reflect.Int
+	case reflect.Int8:
+		return int(v.(int8)), reflect.Int
+	case reflect.Int16:
+		return int(v.(int16)), reflect.Int
+	case reflect.Int32:
+		return int(v.(int32)), reflect.Int
+	case reflect.Int64:
+		return int(v.(int64)), reflect.Int
+	case reflect.Uint:
+		return int(v.(uint)), reflect.Int
+	case reflect.Uint8:
+		return int(v.(uint8)), reflect.Int
+	case reflect.Uint16:
+		return int(v.(uint16)), reflect.Int
+	case reflect.Uint32:
+		return int(v.(uint32)), reflect.Int
+	case reflect.Float32:
+		return float64(v.(float32)), reflect.Float64
+	default:
+		return v, reflect.Float64
+	}
+}

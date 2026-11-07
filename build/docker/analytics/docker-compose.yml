@@ -1,0 +1,117 @@
+name: yorkie-analytics
+
+services:
+  starrocks-fe:
+    image: starrocks/fe-ubuntu:3.3.22
+    hostname: starrocks-fe
+    user: root
+    ports:
+      - 8030:8030
+      - 9020:9020
+      - 9030:9030
+    command: /opt/starrocks/fe/bin/start_fe.sh
+    healthcheck:
+      test: 'mysql -u root -h starrocks-fe -P 9030 -e "show frontends\G" | grep "Alive: true"'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      # - fe.conf:/opt/starrocks/fe/conf/fe.conf
+      - ./starrocks/starrocks-fe/meta:/opt/starrocks/fe/meta
+      - ./starrocks/fe/log:/opt/starrocks/fe/log
+
+  starrocks-be:
+    image: starrocks/be-ubuntu:3.3.22
+    hostname: starrocks-be
+    user: root
+    ports:
+      - 8040:8040
+    depends_on:
+      starrocks-fe:
+        condition: service_healthy
+    command:
+      - /bin/bash
+      - -c
+      - |
+        sleep 15s; mysql --connect-timeout 2 -h starrocks-fe -P 9030 -u root -e "alter system add backend \"starrocks-be:9050\";"  
+        /opt/starrocks/be/bin/start_be.sh
+    healthcheck:
+      test: 'mysql -u root -h starrocks-fe -P 9030 -e "show backends\G" | grep "Alive: true"'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      # - be.conf:/opt/starrocks/be/conf/be.conf
+      - ./starrocks/starrocks-be/storage:/opt/starrocks/be/storage
+      - ./starrocks/starrocks-be/log:/opt/starrocks/be/log
+
+  kafka:
+    image: docker.io/apache/kafka:4.1.1
+    ports:
+      - "29092:29092"
+    volumes:
+      - "kafka_data:/var/lib/kafka/data"
+    environment:
+      # KRaft settings
+      - KAFKA_NODE_ID=0
+      - KAFKA_PROCESS_ROLES=controller,broker
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      # Listeners
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+    healthcheck:
+      test: /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  init-kafka-topics:
+    image: docker.io/apache/kafka:4.1.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    working_dir: /opt/kafka/bin
+    volumes:
+      - ./init-kafka-topics.sh:/init-kafka-topics.sh
+    entrypoint: ["/bin/bash"]
+    command: ["/init-kafka-topics.sh"]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui
+    ports:
+      - "8989:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: always
+    environment:
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+
+  init-starrocks-database:
+    image: starrocks/fe-ubuntu:3.3.22
+    depends_on:
+      starrocks-fe:
+        condition: service_healthy
+      starrocks-be:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      init-kafka-topics:
+        condition: service_completed_successfully
+    volumes:
+      - ./init-create-table.sql:/init-create-table.sql
+      - ./init-create-mv.sql:/init-create-mv.sql
+      - ./init-create-summary.sql:/init-create-summary.sql
+      - ./init-backfill-summary.sql:/init-backfill-summary.sql
+      - ./init-create-routine-load.sql:/init-create-routine-load.sql
+      - ./init-starrocks-database.sh:/init-starrocks-database.sh
+    entrypoint: ["/bin/bash"]
+    command: ["/init-starrocks-database.sh"]
+
+volumes:
+  kafka_data:
+    driver: local

@@ -1,0 +1,798 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package crdt
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"unicode/utf16"
+
+	"github.com/yorkie-team/yorkie/pkg/document/resource"
+	"github.com/yorkie-team/yorkie/pkg/document/time"
+	"github.com/yorkie-team/yorkie/pkg/llrb"
+	"github.com/yorkie-team/yorkie/pkg/splay"
+)
+
+// TextValue is a value of Text which has an attributes that represent
+// the text style.
+type TextValue struct {
+	value string
+	attrs *RHT
+}
+
+// NewTextValue creates a value of Text.
+func NewTextValue(value string, attrs *RHT) *TextValue {
+	return &TextValue{
+		value: value,
+		attrs: attrs,
+	}
+}
+
+// Attrs returns the attributes of this value.
+func (t *TextValue) Attrs() *RHT {
+	return t.attrs
+}
+
+// Value returns the value of this text value.
+func (t *TextValue) Value() string {
+	return t.value
+}
+
+// Len returns the length of this value.
+// It is calculated in UTF-16 code units.
+//
+// It counts rather than encodes: the splay tree reads it on every weight
+// update, so an allocation here is paid on every edit.
+func (t *TextValue) Len() int {
+	length := 0
+	for _, r := range t.value {
+		// utf16.Encode writes an unencodable rune as one U+FFFD.
+		length += max(utf16.RuneLen(r), 1)
+	}
+	return length
+}
+
+// String returns the string representation of this value.
+func (t *TextValue) String() string {
+	return t.value
+}
+
+// Marshal returns the JSON encoding of this text.
+func (t *TextValue) Marshal() string {
+	if len(t.attrs.Elements()) == 0 {
+		return fmt.Sprintf(`{"val":"%s"}`, EscapeString(t.value))
+	}
+
+	return fmt.Sprintf(
+		`{"attrs":%s,"val":"%s"}`,
+		t.attrs.Marshal(),
+		EscapeString(t.value),
+	)
+}
+
+// toTestString returns a String containing the metadata of this value
+// for debugging purpose.
+func (t *TextValue) toTestString() string {
+	return fmt.Sprintf(
+		`%s "%s"`,
+		t.attrs.Marshal(),
+		EscapeString(t.value),
+	)
+}
+
+func (t *TextValue) DataSize() resource.DataSize {
+	dataSize := resource.DataSize{
+		Data: len(t.value) * 2,
+		Meta: 0,
+	}
+
+	for _, node := range t.attrs.Nodes() {
+		// A removed attribute belongs to docSize.GC, not to Live. TreeNode
+		// .DataSize makes the same exclusion; the two halves have to answer
+		// this the same way or a document's size stops being a function of
+		// its content.
+		if node.RemovedAt() != nil {
+			continue
+		}
+
+		size := node.DataSize()
+		dataSize.Data += size.Data
+		dataSize.Meta += size.Meta
+	}
+
+	return dataSize
+}
+
+// Split splits this value by the given offset.
+func (t *TextValue) Split(offset int) RGATreeSplitValue {
+	value := t.value
+	encoded := utf16.Encode([]rune(value))
+	t.value = string(utf16.Decode(encoded[0:offset]))
+
+	return NewTextValue(
+		string(utf16.Decode(encoded[offset:])),
+		t.attrs.DeepCopy(),
+	)
+}
+
+// DeepCopy copies itself deeply.
+func (t *TextValue) DeepCopy() RGATreeSplitValue {
+	return &TextValue{
+		attrs: t.attrs.DeepCopy(),
+		value: t.value,
+	}
+}
+
+// removedAttrs implements gcAttrSource: it reports the tombstoned attributes
+// this value holds, which a split has just duplicated from its source.
+func (t *TextValue) removedAttrs() []*RHTNode {
+	if t.attrs == nil {
+		return nil
+	}
+
+	var removed []*RHTNode
+	for _, node := range t.attrs.Nodes() {
+		if node.RemovedAt() != nil {
+			removed = append(removed, node)
+		}
+	}
+
+	return removed
+}
+
+// Purge removes the given ticket from this value.
+func (t *TextValue) Purge(child GCChild) error {
+	rhtNode := child.(*RHTNode)
+	return t.attrs.Purge(rhtNode)
+}
+
+// HasCancelledRemovals reports whether any piece's removal ledger holds a
+// cancel that PruneLedgers may drop later.
+func (t *Text) HasCancelledRemovals() bool {
+	return t.rgaTreeSplit.HasCancelledRemovals()
+}
+
+// PruneLedgers drops the removals whose cancels the given vector covers from
+// the pieces' ledgers, and returns how many pieces still hold a cancel.
+func (t *Text) PruneLedgers(vector time.VersionVector) int {
+	return t.rgaTreeSplit.PruneLedgers(vector)
+}
+
+// GCPairs returns the pairs of GC.
+func (t *TextValue) GCPairs() []GCPair {
+	if t.attrs == nil {
+		return nil
+	}
+
+	var pairs []GCPair
+	for _, node := range t.attrs.Nodes() {
+		if node.isRemoved {
+			// DataSize skips a removed attribute, so the root this scan runs
+			// against never counted it into Live -- GCOnlySize is how a pair
+			// says "add to GC, take nothing out of Live". See RegisterGCPair.
+			gcSize := node.DataSize()
+			pairs = append(pairs, GCPair{
+				Parent:     t,
+				Child:      node,
+				GCOnlySize: &gcSize,
+			})
+		}
+	}
+
+	return pairs
+}
+
+// InitialTextNode creates an initial node of Text. The text is edited
+// as this node is split into multiple nodes.
+func InitialTextNode() *RGATreeSplitNode[*TextValue] {
+	return NewRGATreeSplitNode(initialNodeID, &TextValue{
+		attrs: NewRHT(),
+		value: "",
+	})
+}
+
+// Text is an extended data type for the contents of a text editor.
+type Text struct {
+	rgaTreeSplit *RGATreeSplit[*TextValue]
+	createdAt    *time.Ticket
+	movedAt      *time.Ticket
+	removedAt    *time.Ticket
+}
+
+// NewText creates a new instance of Text.
+func NewText(elements *RGATreeSplit[*TextValue], createdAt *time.Ticket) *Text {
+	return &Text{
+		rgaTreeSplit: elements,
+		createdAt:    createdAt,
+	}
+}
+
+// String returns the string representation of this Text.
+func (t *Text) String() string {
+	var values []string
+
+	node := t.rgaTreeSplit.initialHead.next
+	for node != nil {
+		if node.createdAt().Compare(t.createdAt) != 0 && node.removedAt == nil {
+			values = append(values, node.String())
+		}
+		node = node.next
+	}
+
+	return strings.Join(values, "")
+}
+
+// MetaSize returns the size of the metadata of this element.
+func (t *Text) MetaSize() int {
+	size := 0
+	if t.createdAt != nil {
+		size += time.TicketSize
+	}
+	if t.movedAt != nil {
+		size += time.TicketSize
+	}
+	if t.removedAt != nil {
+		size += time.TicketSize
+	}
+	return size
+}
+
+// DataSize returns the data usage of this element.
+func (t *Text) DataSize() resource.DataSize {
+	dataSize := resource.DataSize{
+		Data: 0,
+		Meta: 0,
+	}
+
+	// traverse the nodes and calculate the size
+	for _, node := range t.Nodes() {
+		if node.createdAt().Compare(t.createdAt) != 0 && node.removedAt == nil {
+			size := node.DataSize()
+			dataSize.Data += size.Data
+			dataSize.Meta += size.Meta
+		}
+	}
+
+	return resource.DataSize{
+		Data: dataSize.Data,
+		Meta: dataSize.Meta + t.MetaSize(),
+	}
+}
+
+// Marshal returns the JSON encoding of this Text.
+func (t *Text) Marshal() string {
+	var values []string
+
+	node := t.rgaTreeSplit.initialHead.next
+	for node != nil {
+		if node.createdAt().Compare(t.createdAt) != 0 && node.removedAt == nil {
+			values = append(values, node.Marshal())
+		}
+		node = node.next
+	}
+
+	return fmt.Sprintf("[%s]", strings.Join(values, ","))
+}
+
+// DeepCopy copies itself deeply.
+func (t *Text) DeepCopy() (Element, error) {
+	rgaTreeSplit := NewRGATreeSplit(InitialTextNode())
+	current := rgaTreeSplit.InitialHead()
+
+	for _, node := range t.Nodes() {
+		current = rgaTreeSplit.InsertAfter(current, node.DeepCopy())
+		insPrevID := node.InsPrevID()
+		if insPrevID != nil {
+			insPrevNode := rgaTreeSplit.FindNode(insPrevID)
+			if insPrevNode == nil {
+				return nil, fmt.Errorf("insPrevNode should be presence")
+			}
+			current.SetInsPrev(insPrevNode)
+		}
+	}
+
+	text := NewText(rgaTreeSplit, t.createdAt)
+	text.movedAt = t.movedAt
+	text.removedAt = t.removedAt
+	return text, nil
+}
+
+// GCPairs returns the pairs of GC.
+func (t *Text) GCPairs() []GCPair {
+	var pairs []GCPair
+	for _, node := range t.Nodes() {
+		if node.removedAt != nil {
+			// Text.DataSize skips a removed node, so this one was never in
+			// the Live the scan's root was built with.
+			gcSize := node.DataSize()
+			pairs = append(pairs, GCPair{
+				Parent:     t.rgaTreeSplit,
+				Child:      node,
+				GCOnlySize: &gcSize,
+			})
+		}
+
+		pairs = append(pairs, node.Value().GCPairs()...)
+	}
+
+	return pairs
+}
+
+// CreatedAt returns the creation time of this Text.
+func (t *Text) CreatedAt() *time.Ticket {
+	return t.createdAt
+}
+
+// SetCreatedAt sets the creation time of this Text manually.
+func (t *Text) SetCreatedAt(createdAt *time.Ticket) {
+	t.createdAt = createdAt
+}
+
+// RemovedAt returns the removal time of this Text.
+func (t *Text) RemovedAt() *time.Ticket {
+	return t.removedAt
+}
+
+// MovedAt returns the move time of this Text.
+func (t *Text) MovedAt() *time.Ticket {
+	return t.movedAt
+}
+
+// SetMovedAt sets the move time of this Text.
+func (t *Text) SetMovedAt(movedAt *time.Ticket) {
+	t.movedAt = movedAt
+}
+
+// SetRemovedAt sets the removal time of this array.
+func (t *Text) SetRemovedAt(removedAt *time.Ticket) {
+	t.removedAt = removedAt
+}
+
+// Remove removes this Text.
+func (t *Text) Remove(removedAt *time.Ticket) bool {
+	if (removedAt != nil && removedAt.After(t.createdAt)) &&
+		(t.removedAt == nil || removedAt.After(t.removedAt)) {
+		t.removedAt = removedAt
+		return true
+	}
+	return false
+}
+
+// CreateRange returns a pair of RGATreeSplitNodePos of the given integer offsets.
+func (t *Text) CreateRange(from, to int) (*RGATreeSplitNodePos, *RGATreeSplitNodePos, error) {
+	fromPos, toPos, err := t.rgaTreeSplit.createRange(from, to)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := t.validateUTF16Boundary(fromPos); err != nil {
+		return nil, nil, err
+	}
+
+	if from != to {
+		if err := t.validateUTF16Boundary(toPos); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return fromPos, toPos, nil
+}
+
+// validateUTF16Boundary validates that pos does not split a surrogate pair.
+func (t *Text) validateUTF16Boundary(pos *RGATreeSplitNodePos) error {
+	node := t.rgaTreeSplit.findFloorNode(pos.id)
+	if node == nil {
+		return fmt.Errorf(
+			"the node of the given position should be found: %s",
+			pos.ToTestString(),
+		)
+	}
+
+	if !isUTF16Boundary(node.value.Value(), pos.relativeOffset) {
+		return ErrInvalidUTF16Index
+	}
+
+	return nil
+}
+
+// Edit edits the given range with the given content and attributes. Besides
+// the caret position, GC pairs, and size diff, it reports the content the
+// edit removed: removedValues holds each removed node's text (parallel to
+// removedSpans), and removedSpans identifies each by its original identity
+// (createdAt, offset range) so a reverse operation can revive or re-remove
+// it by that identity rather than by copy-reinserting text.
+func (t *Text) Edit(
+	from,
+	to *RGATreeSplitNodePos,
+	content string,
+	attributes map[string]string,
+	executedAt *time.Ticket,
+	versionVector time.VersionVector,
+) (*RGATreeSplitNodePos, []GCPair, resource.DataSize, []string, []RestoreSpan, error) {
+	val := NewTextValue(content, NewRHT())
+	for key, value := range attributes {
+		val.attrs.Set(key, value, executedAt)
+	}
+
+	caretPos, pairs, diff, removed, err := t.rgaTreeSplit.edit(
+		from,
+		to,
+		val,
+		executedAt,
+		versionVector,
+	)
+	if err != nil {
+		return caretPos, pairs, diff, nil, nil, err
+	}
+
+	// Pre-size for the common case (server replay, snapshot rebuild) where
+	// every removed node is read exactly once below; skip Attrs().Elements()
+	// (a fresh map allocation) for the common plain-text node, whose RHT is
+	// empty. Text.Restore already treats a nil Attributes map the same as an
+	// empty one (its `for k, v := range s.Attributes` is a no-op on nil).
+	removedValues := make([]string, 0, len(removed))
+	removedSpans := make([]RestoreSpan, 0, len(removed))
+	for _, span := range removed {
+		content := span.value.String()
+		removedValues = append(removedValues, content)
+
+		var attrs map[string]string
+		if span.value.Attrs().Len() > 0 {
+			attrs = span.value.Attrs().Elements()
+		}
+		removedSpans = append(removedSpans, RestoreSpan{
+			CreatedAt:  span.createdAt,
+			Start:      span.start,
+			End:        span.end,
+			Content:    content,
+			Attributes: attrs,
+		})
+	}
+
+	return caretPos, pairs, diff, removedValues, removedSpans, nil
+}
+
+// Restore revives the characters described by spans under their original
+// identities. Returns (untombstoned, recreated, stillTombstoned); see
+// RGATreeSplit.restore.
+func (t *Text) Restore(
+	spans []*RestoreSpan,
+	executedAt *time.Ticket,
+	from *RGATreeSplitNodePos,
+) (untombstoned, recreated []*RGATreeSplitNode[*TextValue], stillTombstoned []GCPair, err error) {
+	internal := make([]restoreSpanValue[*TextValue], 0, len(spans))
+	for _, s := range spans {
+		attrs := NewRHT()
+		for k, v := range s.Attributes {
+			attrs.Set(k, v, executedAt)
+		}
+		internal = append(internal, restoreSpanValue[*TextValue]{
+			createdAt: s.CreatedAt,
+			start:     s.Start,
+			end:       s.End,
+			value:     NewTextValue(s.Content, attrs),
+		})
+	}
+	// `from` is the op's left boundary; it anchors a fragment whose whole
+	// insertion was purged (fallback rung in findRestoreAnchor). Identity
+	// (createdAt+offset) still addresses every surviving piece first.
+	return t.rgaTreeSplit.restore(internal, from, executedAt)
+}
+
+// Retombstone re-removes a previously restored range under its original
+// identities. Returns GC pairs for the newly tombstoned nodes and for the
+// born-dead remainders its splits left behind, whether any live piece was
+// tombstoned, the net docSize diff from splitting live pieces, and the spans
+// the removal was recorded on, named as the removal a reverse would cancel.
+func (t *Text) Retombstone(
+	spans []*RestoreSpan,
+	executedAt *time.Ticket,
+	versionVector time.VersionVector,
+) ([]GCPair, bool, resource.DataSize, []*RestoreSpan, error) {
+	internal := make([]restoreSpanValue[*TextValue], 0, len(spans))
+	for _, s := range spans {
+		internal = append(internal, restoreSpanValue[*TextValue]{
+			createdAt: s.CreatedAt,
+			start:     s.Start,
+			end:       s.End,
+			value:     NewTextValue(s.Content, NewRHT()),
+		})
+	}
+	pairs, tombstoned, diff, recorded, err := t.rgaTreeSplit.retombstone(internal, executedAt, versionVector)
+	if err != nil {
+		return nil, false, diff, nil, err
+	}
+
+	out := make([]*RestoreSpan, 0, len(recorded))
+	for _, r := range recorded {
+		var attrs map[string]string
+		for _, s := range spans {
+			if s.CreatedAt.Compare(r.createdAt) == 0 && s.Start <= r.start && r.end <= s.End {
+				attrs = s.Attributes
+				break
+			}
+		}
+		out = append(out, &RestoreSpan{
+			CreatedAt:  r.createdAt,
+			Start:      r.start,
+			End:        r.end,
+			Content:    r.value.String(),
+			Attributes: attrs,
+		})
+	}
+	return pairs, tombstoned, diff, out, nil
+}
+
+// NormalizePos converts the given position into a single absolute offset
+// measured from the head of the physical chain. A reverse operation anchors
+// on the normalized form so a later split of the chain does not move it.
+func (t *Text) NormalizePos(pos *RGATreeSplitNodePos) (*RGATreeSplitNodePos, error) {
+	return t.rgaTreeSplit.normalizePos(pos)
+}
+
+// RefinePos remaps the given position onto the current split chain by
+// reinterpreting its offset against the live text. A position recorded before
+// the chain was split still addresses the same place; one recorded before a
+// deletion does not, since removed characters no longer consume offset.
+func (t *Text) RefinePos(pos *RGATreeSplitNodePos) (*RGATreeSplitNodePos, error) {
+	return t.rgaTreeSplit.refinePos(pos)
+}
+
+// RGATreeSplit returns the underlying RGATreeSplit of this Text.
+func (t *Text) RGATreeSplit() *RGATreeSplit[*TextValue] {
+	return t.rgaTreeSplit
+}
+
+// PrevAttr captures the value a style attribute held immediately before a
+// Style or RemoveStyle call overwrote it, or its absence, on the first node
+// in the range the call actually visits. A reverse Style uses Existed to
+// decide whether to restore Value or remove Key outright.
+type PrevAttr struct {
+	Key     string
+	Value   string
+	Existed bool
+}
+
+// Style applies the given attributes of the given range. Besides the GC
+// pairs, it reports how the write moved the ledger — Live for a live node,
+// GC for one styled while it is a tombstone, see accAttrWrite — and, for
+// each key in attributes, the value that key held (or its absence) on the
+// first node actually styled — see PrevAttr — so a reverse Style can restore
+// that prior state. Keys are captured in sorted order so the result (and
+// anything built from it, such as a reverse operation's wire encoding) is
+// deterministic regardless of Go's randomized map iteration order.
+func (t *Text) Style(
+	from,
+	to *RGATreeSplitNodePos,
+	attributes map[string]string,
+	executedAt *time.Ticket,
+	versionVector time.VersionVector,
+) ([]GCPair, resource.DocSize, []PrevAttr, error) {
+	var size resource.DocSize
+
+	// 01. Split nodes with from and to
+	_, toRight, diffTo, err := t.rgaTreeSplit.findNodeWithSplit(to, executedAt)
+	if err != nil {
+		return t.rgaTreeSplit.drainPendingGCPairs(), size, nil, err
+	}
+	_, fromRight, diffFrom, err := t.rgaTreeSplit.findNodeWithSplit(from, executedAt)
+	if err != nil {
+		size.Live.Add(diffTo)
+		return t.rgaTreeSplit.drainPendingGCPairs(), size, nil, err
+	}
+
+	size.Live.Add(diffTo, diffFrom)
+
+	// 02. style nodes between from and to
+	nodes := t.rgaTreeSplit.findBetween(fromRight, toRight)
+
+	var toBeStyled []*RGATreeSplitNode[*TextValue]
+
+	for _, node := range nodes {
+		if node.canStyle(versionVector) {
+			toBeStyled = append(toBeStyled, node)
+		}
+	}
+
+	var pairs []GCPair
+	var prevAttrs []PrevAttr
+	captured := false
+	// The reverse operation restores what the VISIBLE text held, so the prior
+	// values come from the first LIVE node in the range. canStyle admits
+	// tombstones, and the first node in the range can be one -- capturing from
+	// it makes an undo write an attribute onto text that never carried it, out
+	// of a run the user had already deleted. The fallback to the first node
+	// keeps an all-tombstone range undoable.
+	var captureFrom *RGATreeSplitNode[*TextValue]
+	if len(toBeStyled) > 0 {
+		captureFrom = toBeStyled[0]
+		for _, node := range toBeStyled {
+			if node.RemovedAt() == nil {
+				captureFrom = node
+				break
+			}
+		}
+	}
+
+	for _, node := range toBeStyled {
+		val := node.value
+
+		if !captured && node == captureFrom {
+			keys := slices.AppendSeq(make([]string, 0, len(attributes)), maps.Keys(attributes))
+			slices.Sort(keys)
+			for _, key := range keys {
+				if val.attrs.Has(key) {
+					prevAttrs = append(prevAttrs, PrevAttr{Key: key, Value: val.attrs.Get(key), Existed: true})
+				} else {
+					prevAttrs = append(prevAttrs, PrevAttr{Key: key, Existed: false})
+				}
+			}
+			captured = true
+		}
+
+		for key, value := range attributes {
+			accAttrWrite(
+				val.attrs.Set(key, value, executedAt),
+				node.Value(),
+				node.RemovedAt() == nil,
+				&pairs,
+				&size,
+			)
+		}
+	}
+
+	pairs = append(pairs, t.rgaTreeSplit.drainPendingGCPairs()...)
+
+	return pairs, size, prevAttrs, nil
+}
+
+// RemoveStyle removes the given attributes from the given range. Besides the
+// GC pairs and the ledger movement (see Style), it reports the value each
+// removed key held on the first node actually visited — see PrevAttr — so a
+// reverse operation can restore it. Unlike Style, a key that did not exist on
+// that node is simply omitted (no Existed: false entry), matching JS's
+// removeStyle: removing an already-absent attribute has nothing to reverse.
+// Keys are captured in sorted order for the same determinism reason as Style.
+func (t *Text) RemoveStyle(
+	from,
+	to *RGATreeSplitNodePos,
+	attributesToRemove []string,
+	executedAt *time.Ticket,
+	versionVector time.VersionVector,
+) ([]GCPair, resource.DocSize, []PrevAttr, error) {
+	var size resource.DocSize
+
+	// 01. Split nodes with from and to
+	_, toRight, diffTo, err := t.rgaTreeSplit.findNodeWithSplit(to, executedAt)
+	if err != nil {
+		return t.rgaTreeSplit.drainPendingGCPairs(), size, nil, err
+	}
+	_, fromRight, diffFrom, err := t.rgaTreeSplit.findNodeWithSplit(from, executedAt)
+	if err != nil {
+		size.Live.Add(diffTo)
+		return t.rgaTreeSplit.drainPendingGCPairs(), size, nil, err
+	}
+
+	size.Live.Add(diffTo, diffFrom)
+
+	// 02. find nodes between from and to that can be styled
+	nodes := t.rgaTreeSplit.findBetween(fromRight, toRight)
+
+	var toBeStyled []*RGATreeSplitNode[*TextValue]
+
+	for _, node := range nodes {
+		if node.canStyle(versionVector) {
+			toBeStyled = append(toBeStyled, node)
+		}
+	}
+
+	// 03. remove attributes from styled nodes
+	var pairs []GCPair
+	var prevAttrs []PrevAttr
+	captured := false
+	// The reverse operation restores what the VISIBLE text held, so the prior
+	// values come from the first LIVE node in the range. canStyle admits
+	// tombstones, and the first node in the range can be one -- capturing from
+	// it makes an undo write an attribute onto text that never carried it, out
+	// of a run the user had already deleted. The fallback to the first node
+	// keeps an all-tombstone range undoable.
+	var captureFrom *RGATreeSplitNode[*TextValue]
+	if len(toBeStyled) > 0 {
+		captureFrom = toBeStyled[0]
+		for _, node := range toBeStyled {
+			if node.RemovedAt() == nil {
+				captureFrom = node
+				break
+			}
+		}
+	}
+
+	for _, node := range toBeStyled {
+		val := node.value
+
+		if !captured && node == captureFrom {
+			keys := slices.Clone(attributesToRemove)
+			slices.Sort(keys)
+			for _, key := range keys {
+				if val.attrs.Has(key) {
+					prevAttrs = append(prevAttrs, PrevAttr{Key: key, Value: val.attrs.Get(key), Existed: true})
+				}
+			}
+			captured = true
+		}
+
+		for _, attr := range attributesToRemove {
+			// canStyle admits a node removed concurrently with this change,
+			// so the NODE holding the attribute may itself be a tombstone --
+			// the third case attrGCPair asks about.
+			attrWasLive := val.attrs.Has(attr)
+			nodeIsLive := node.RemovedAt() == nil
+			removal := val.attrs.Remove(attr, executedAt)
+
+			// The tombstone carries no value, so the bytes the replaced value
+			// was charging leave the ledger that was holding them: Live while
+			// this node is live, GC once the node is a tombstone whose own
+			// charge already covered its live attributes.
+			if nodeIsLive {
+				size.Live.Sub(removal.ValueDropped)
+			} else {
+				size.GC.Sub(removal.ValueDropped)
+			}
+
+			for _, rhtNode := range removal.GCNodes {
+				pairs = append(pairs, attrGCPair(node.Value(), rhtNode, attrWasLive, nodeIsLive))
+				// Only the node that replaces the live value settles the live
+				// value's bytes; a second one in the same call is the
+				// tombstone it superseded, which was never in Live.
+				attrWasLive = false
+			}
+		}
+	}
+
+	pairs = append(pairs, t.rgaTreeSplit.drainPendingGCPairs()...)
+
+	return pairs, size, prevAttrs, nil
+}
+
+// Nodes returns the internal nodes of this Text.
+func (t *Text) Nodes() []*RGATreeSplitNode[*TextValue] {
+	return t.rgaTreeSplit.nodes()
+}
+
+// ToTestString returns a String containing the metadata of the text
+// for debugging purpose.
+func (t *Text) ToTestString() string {
+	return t.rgaTreeSplit.ToTestString()
+}
+
+// CheckWeight returns false when there is an incorrect weight node.
+// for debugging purpose.
+func (t *Text) CheckWeight() bool {
+	return t.rgaTreeSplit.CheckWeight()
+}
+
+// TreeByIndex returns IndexTree of the text for debugging purpose.
+func (t *Text) TreeByIndex() *splay.Tree[*RGATreeSplitNode[*TextValue]] {
+	return t.rgaTreeSplit.treeByIndex
+}
+
+// TreeByID returns the tree by ID for debugging purpose.
+func (t *Text) TreeByID() *llrb.Tree[*RGATreeSplitNodeID, *RGATreeSplitNode[*TextValue]] {
+	return t.rgaTreeSplit.treeByID
+}

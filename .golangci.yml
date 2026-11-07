@@ -1,0 +1,94 @@
+version: "2"
+linters:
+  enable:
+    - goconst
+    - gocyclo
+    - goprintffuncname
+    - gosec
+    - lll
+    - misspell
+    - nakedret
+    - revive
+    - wrapcheck
+  settings:
+    gosec:
+      excludes:
+        - G107
+        - G115
+        - G118
+    staticcheck:
+      # golangci-lint's default set, minus QF1008. The json package wraps each
+      # CRDT type by embedding it, and spells out `p.Array.X` / `p.Object.X`
+      # on purpose: the selector says which layer a call lands in.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -QF1008
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+    wrapcheck:
+      ignore-sig-regexps:
+        - github.com/yorkie-team/yorkie
+        - context.Context
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - lll
+        path: api/types/updatable_project_fields.go
+      # Golden wire bytes. Wrapping them would make a mismatch unreadable in
+      # the diff, which is the only thing the file is for.
+      - linters:
+          - lll
+        path: pkg/document/wire_forward_compat_test.go
+      # The tag-gated suites under test/ hold golden strings, the same fixture
+      # keys in every case, and table-driven tests hundreds of cases long.
+      # Line length, repeated literals and cyclomatic complexity measure none
+      # of what makes them correct. test/helper is ordinary code and stays in.
+      - linters:
+          - lll
+          - goconst
+          - gocyclo
+        path: ^test/(integration|bench|complex|fuzz)/
+      # The deprecated Watch RPCs are still served to clients that predate
+      # WatchRequest; the handlers have to name the deprecated types.
+      - linters:
+          - staticcheck
+        path: server/rpc/yorkie_server.go
+        text: "SA1019: api\\.(WatchDocument|WatchChannel)"
+      # x/net v0.60 deprecated its HTTP/2 server, transport and h2c in favor
+      # of net/http's Protocols. Moving the RPC server and the clients onto
+      # net/http changes connection behavior, so it is kept out of the
+      # security bump that pulled in v0.60+ and done on its own. Until then,
+      # note that from Go 1.27 x/net builds these types as wrappers over
+      # net/http (unless the http2legacy tag is set), so a toolchain bump to
+      # 1.27 changes the RPC server's HTTP/2 behavior too.
+      - linters:
+          - staticcheck
+        path: ^((admin|client|cluster)/client|server/rpc/server)\.go$
+        text: "SA1019: (http2\\.(Transport|Server)|\"golang.org/x/net/http2/h2c\"|h2c\\.NewHandler) is deprecated"
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/yorkie-team/yorkie
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

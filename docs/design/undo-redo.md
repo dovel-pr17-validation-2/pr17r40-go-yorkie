@@ -1,0 +1,920 @@
+---
+title: undo-redo
+target-version: 0.7.8
+---
+
+# Undo/Redo (History)
+
+## Summary
+
+Undo/Redo allows users to reverse and replay their local edits in a collaborative
+environment. Each client maintains its own undo/redo stacks, so undoing only
+reverses the current user's operations while preserving other users' concurrent
+edits. This document describes the architecture, reverse operation generation for
+each data type, and the position reconciliation mechanism that keeps undo
+operations valid when remote edits arrive.
+
+The mechanism described here is implemented in the JS SDK. Porting it to the Go
+SDK is covered by [undo-redo-go-port.md](undo-redo-go-port.md).
+
+### Goals
+
+- Provide per-client undo/redo for all mutable data types: Object, Array, Text,
+  Tree, Counter.
+- Ensure convergence: after undo/redo and sync, all clients reach the same
+  document state.
+- Handle concurrent edits: remote operations must not break pending undo/redo
+  operations.
+
+### Non-Goals
+
+- Server-side undo/redo or global history browsing.
+- Undo/redo for `TreeStyleOperation` with multi-client reconciliation (single-client undo/redo is now supported via PR #1221).
+- Convergence between replicas that run different Text removal-ledger rules. The ledger lands in this repository and in yorkie-js-sdk on the same release train (yorkie#2310, yorkie-js-sdk#1494), so a Go change without its JS counterpart in the same pull request is expected, and there is no capability negotiation for a mixed-version document. An older SDK keeps disagreeing with an upgraded one whenever an undo meets a concurrent deletion, as it does without the ledger; see "Removal Ledger" for the server-first upgrade order.
+
+> **Resolved, 2026-08-09 (`fa6cc513`):** this document originally listed
+> "overlapping range reconciliation for Tree (Cases 3–6)" as a non-goal
+> deferred to a future "Phase 2" (see "Phase 2: Overlapping Range
+> Reconciliation" below for the reasoning that was current at the time).
+> Identity-preserving restore for Tree undo/redo landed instead, and made the
+> Phase 2 index-arithmetic work unnecessary for ordinary edits: a
+> merge- and split-free edit's reverse now revives/re-removes nodes by
+> original identity rather than by the asymmetric integer positions Phase 2
+> was trying to reconcile, so `reconcileOperation`'s own guard skips index
+> reconciliation for it entirely. `fa6cc513` un-skipped Cases 3, 4, 5, and 6
+> in `history_tree_test.ts` the same day. The Phase 2 section and the "Risk:
+> Asymmetric reconciliation" note below are kept for the reasoning they
+> record, not as a description of current behavior.
+
+## Proposal Details
+
+### Architecture Overview
+
+```
+┌──────────────────────────────────────────────────┐
+│ Document                                         │
+│  ┌──────────────────────────┐                    │
+│  │ History                  │                    │
+│  │  ┌────────────────────┐  │                    │
+│  │  │ undoStack (max 50) │  │  pushUndo ◄── execute(op) produces reverseOp
+│  │  └────────────────────┘  │                    │
+│  │  ┌────────────────────┐  │                    │
+│  │  │ redoStack (max 50) │  │  pushRedo ◄── undo() produces reverseOp
+│  │  └────────────────────┘  │                    │
+│  └──────────────────────────┘                    │
+│                                                  │
+│  document.update(fn)  ── local edit ──►  reverseOps ──► undoStack
+│  document.history.undo() ──────────────► reverseOps ──► redoStack
+│  document.history.redo() ──────────────► reverseOps ──► undoStack
+│                                                  │
+│  Remote change arrives ──► reconcile pending undo/redo positions
+└──────────────────────────────────────────────────┘
+```
+
+Each entry in the undo/redo stacks is an `Array<HistoryOperation>`, which may
+contain CRDT operations and/or presence changes. A single `document.update()`
+call produces one undo entry (potentially with multiple reverse operations).
+
+The redo stack is cleared whenever a new local edit is made, following standard
+undo/redo semantics.
+
+### Reverse Operation Generation
+
+When an operation executes, it produces a `reverseOp` — the operation that, when
+executed, undoes the effect of the original. The following table summarizes the
+mapping, and each subsection below explains the details.
+
+| Operation | Reverse Operation |
+|---|---|
+| `SetOperation` (Object.set) | `RemoveOperation` or `SetOperation` |
+| `RemoveOperation` (Object/Array.remove) | `AddOperation` or `SetOperation` |
+| `AddOperation` (Array.push) | `RemoveOperation` |
+| `MoveOperation` (Array.move) | `MoveOperation` |
+| `ArraySetOperation` (Array.set) | `ArraySetOperation` |
+| `IncreaseOperation` (Counter) | `IncreaseOperation` |
+| `EditOperation` (Text.edit) | `EditOperation` |
+| `StyleOperation` (Text.style) | `StyleOperation` |
+| `TreeEditOperation` (Tree.edit, splitLevel=0) | `TreeEditOperation` |
+| `TreeEditOperation` (Tree.edit, splitLevel >= 1) | `TreeEditOperation` (boundary deletion) — see [tree-split-undo-redo.md](tree-split-undo-redo.md) |
+| `TreeStyleOperation` (Tree.style) | `TreeStyleOperation` |
+
+#### Object.set → SetOperation
+
+`SetOperation` sets a key-value pair on a `CRDTObject`. Before setting, it
+captures the previous value at that key.
+
+```
+Forward:  obj.set("name", "Bob")          // previous value was "Alice"
+Reverse:  SetOperation("name", "Alice")   // restore previous value
+```
+
+- If the key **existed** and was not tombstoned: reverse is a `SetOperation` with
+  a deep copy of the previous value.
+- If the key **did not exist** (or was already removed): reverse is a
+  `RemoveOperation` targeting the newly set element's `createdAt`.
+
+#### Object/Array.remove → RemoveOperation
+
+`RemoveOperation` deletes an element from a `CRDTObject` or `CRDTArray`. The
+reverse depends on the container type.
+
+**Array case:**
+```
+Forward:  arr.remove(2)                   // removes element at index 2
+Reverse:  AddOperation(prevCreatedAt, deepcopy(removedValue))
+```
+The reverse is an `AddOperation` that re-inserts the removed element. It captures
+`prevCreatedAt` — the identity of the element that was immediately before the
+removed element — to restore the correct position.
+
+**Object case:**
+```
+Forward:  obj.remove("name")              // removes key "name" with value "Alice"
+Reverse:  SetOperation("name", "Alice")   // restore key-value pair
+```
+The reverse is a `SetOperation` that restores the key with a deep copy of the
+removed value. The key is retrieved via `subPathOf(createdAt)`.
+
+#### Array.push → AddOperation
+
+`AddOperation` inserts an element into a `CRDTArray` after a given
+`prevCreatedAt` position.
+
+```
+Forward:  arr.push("item")               // inserts with new createdAt
+Reverse:  RemoveOperation(createdAt)     // removes the inserted element
+```
+
+The reverse is always a `RemoveOperation` targeting the newly added element's
+`createdAt`. The `executedAt` of the reverse op is left unset and assigned at
+undo execution time.
+
+#### Array.move → MoveOperation
+
+`MoveOperation` moves an element within a `CRDTArray` from its current position
+to after `prevCreatedAt`.
+
+```
+Forward:  arr.move(3, 0)                 // move element at index 3 to index 0
+Reverse:  MoveOperation(originalPrevCreatedAt, createdAt)
+```
+
+The reverse is a `MoveOperation` that moves the element back. It captures
+`originalPrevCreatedAt` by calling `array.getPrevCreatedAt(createdAt)` **before**
+the forward move executes, preserving the element's original position.
+
+#### Array.set → ArraySetOperation
+
+`ArraySetOperation` replaces an element at a specific index in a `CRDTArray`.
+Internally it inserts the new value and deletes the old one.
+
+```
+Forward:  arr.set(1, "new")              // replaces "old" at index 1
+Reverse:  ArraySetOperation(newCreatedAt, deepcopy(oldValue))
+```
+
+The reverse is an `ArraySetOperation` that targets the forward op's newly
+inserted element (`newCreatedAt`) and restores the previous value (deep-copied).
+This effectively swaps the new value back to the old one.
+
+**Known issue — Set after Move**: `RGATreeList.set` is implemented as
+`insertAfter(createdAt, newValue) + delete(createdAt)`. The `insertAfter` uses
+`nodeMapByCreatedAt[createdAt]` to find the insertion anchor. After a move, this
+resolves to the element's **original dead position** — not its current position.
+This is intentional for concurrent convergence (Move→Set and Set→Move both
+produce the same result), but it means undo restores the value at the dead
+position instead of the moved position. See the analysis section
+"Array Set + Move Undo" below for details and proposed fix.
+
+#### Counter.increase → IncreaseOperation
+
+`IncreaseOperation` adds a numeric delta to a `CRDTCounter`.
+
+```
+Forward:  counter.increase(5)
+Reverse:  IncreaseOperation(-5)
+```
+
+The reverse is an `IncreaseOperation` with the **negated** value. It handles both
+`Long` (64-bit integer) and regular `number` types by multiplying by -1.
+
+#### Text.style → StyleOperation
+
+`StyleOperation` modifies text attributes (bold, italic, etc.) over a range
+`[from, to)` in a `CRDTText`. It supports both setting and removing attributes.
+
+```
+Forward:  text.style(0, 5, { bold: "true" })    // was { bold: "false" }
+Reverse:  StyleOperation(0, 5, { bold: "false" }) // restore previous
+```
+
+The reverse captures previous attribute values during execution and swaps them:
+- Attributes that were **set** → reverse **restores** their previous values.
+- Attributes that were **removed** → reverse **re-adds** them with saved values.
+- When both set and remove happened: reverse combines both restorations into a
+  single `StyleOperation`.
+
+The reverse op reuses the same `[fromPos, toPos]` range since attribute changes
+don't shift positions.
+
+### Text.Edit Undo/Redo
+
+Text uses RGA (Replicated Growable Array) with split nodes. The key insight is
+that positions in the RGA are **identity-based** (`RGATreeSplitPos`), not
+index-based. This means positions remain stable under concurrent edits.
+
+#### Reverse Operation
+
+When `Text.edit([from, to], content)` executes:
+1. The edit removes text in `[from, to)` and inserts `content` at `from`.
+2. The reverse operation stores:
+   - `reverseFrom`: the `RGATreeSplitPos` normalized at `from` (via
+     `text.normalizePos()`, which walks the RGA chain)
+   - `reverseTo`: `RGATreeSplitPos.of(from.id, from.offset + content.length)`
+     (identity-based offset relative to the same node)
+   - `reverseContent`: the removed text values joined together
+   - `reverseAttrs`: if exactly one character was removed, its attributes are
+     preserved for restoration
+   - `isUndoOp: true`: marks this as an undo operation for reconciliation
+
+```
+Insert:   edit([5, 5], "Hello")     →  reverse: edit([5, 10], "")
+Delete:   edit([5, 10], "")         →  reverse: edit([5, 5], "Hello")
+Replace:  edit([5, 10], "World")    →  reverse: edit([5, 10], "Hello")
+```
+
+When the undo operation executes, it calls `text.refinePos()` on both positions
+to skip over any tombstoned nodes that may have appeared due to concurrent
+edits.
+
+#### Position Reconciliation
+
+When a remote edit arrives, pending undo/redo operations in the History stacks
+must be adjusted. Text uses `normalizePos()` which walks the physical RGA chain
+to compute visible integer indices. Since the RGA chain is identical on all
+clients (CRDT guarantee), this produces **symmetric values** — the same indices
+on every client.
+
+The reconciliation uses six overlap cases:
+
+```
+Case 1 (left):     [--remote--]  [--undo--]   → shift undo left
+Case 2 (right):    [--undo--]  [--remote--]    → no change
+Case 3 (contains): [-------remote-------]      → collapse to point
+                        [--undo--]
+Case 4 (contained):[--remote--]                → shrink undo range
+                   [---------undo---------]
+Case 5 (overlap_start): [---remote---]         → adjust start
+                             [---undo---]
+Case 6 (overlap_end):       [---remote---]     → adjust end
+                        [---undo---]
+```
+
+#### Removal Ledger
+
+An identity-preserving restore used to clear a node's tombstone outright.
+Two things went wrong once a concurrent deletion was involved:
+
+- The undo revived text a deletion it never saw had removed. From
+  `abcdefgh`, B deletes `d` and undoes it while A deletes `defgh`; A ended
+  with `abcd` and B with `abc`, depending on delivery order.
+- A remote deletion removed every node whose creation it knew, including a
+  node the deleter saw removed and an undo revived on this replica
+  (#2237: d1 `efh`, d2 `eh`).
+
+Each `RGATreeSplitNode` keeps a removal ledger: the deletions that removed it
+while it was live in the deleter's view (`dels`), and the undos that cancelled
+some of them (`cancels`, deletion and cancel ticket). `removedAt` is the
+latest uncancelled deletion, so a node no undo touched looks as before, and
+the ledger is materialized only when a second deletion or a cancel needs it.
+
+- A restore cancels one deletion: the uncancelled one by the actor that runs
+  the undo. An undo reverses its own actor's change, and an actor removes a
+  piece only while it is live in its view, so a piece holds at most one
+  uncancelled deletion by that actor, and the restore needs no field to name
+  it. The node stays removed while another deletion holds it. A redo records
+  a new deletion by the same actor, so the next undo cancels the redo rather
+  than the original.
+- A remote deletion removes a node only if it was live in the deleter's view:
+  its creation is known and every deletion known to the deleter was cancelled
+  by an undo known to it. A node it saw live but someone else removed records
+  the deletion anyway, so a later undo of the other deletion keeps it removed
+  in every order. A redo (`Retombstone`) applies the same rule with the
+  change's version vector.
+- A redo, and the undo of an insertion, return a reverse that names only the
+  pieces they actually recorded a removal on. A restore therefore never
+  reaches a piece that holds no removal by its actor, so a replica that
+  purged the piece can answer it without the piece's ledger.
+- GC keeps a tombstone whose ledger still matters: one held by two or more
+  uncancelled deletions, or one whose deletions and cancels are not all known
+  to every replica (`HeldFromPurge`). Once that ledger is stable, every change
+  that arrives later already knew it, and the one remaining deletion is the
+  only one a restore can cancel; a restore that finds the piece gone
+  recreates it, which is what the ledger would have said. Nothing is kept for a purged
+  piece.
+- Snapshots carry the ledger beyond `removed_at` in one field,
+  `TextNode.removal_events`: every deletion and every cancel ticket except
+  `removed_at` itself. For each actor these alternate in ticket order -- a
+  deletion, then the cancel of it -- for the reason above, so the reader
+  tells them apart by place. A node whose `removed_at` says it all writes
+  nothing: a text whose characters were each removed by one deletion encodes
+  to the same bytes as before, and only a character removed by concurrent
+  deletions or touched by an undo writes its tickets. A piece recreated
+  after GC records a stand-in removal by the undoing actor at lamport 0 and
+  its cancel: the purged removal was known to every replica, so any vector a
+  later change carries covers the stand-in too. A reader that finds events
+  breaking these rules refuses the bytes: a node left with `removed_at` alone
+  answers `isRemovedInView` and `uncancelledRemovalBy` differently from every
+  replica holding the full ledger, so dropping the ledger buys a document
+  that loads and then diverges. The same decoder reads the element payload of
+  a client-pushed `Set`/`Add`/`ArraySet`, where the length is whatever the
+  sender wrote, so every walk of a ledger is linear in its length, not
+  quadratic, and such a payload is refused past `maxTextRemovalEvents` per
+  node. A snapshot has no such bound: one replica that deletes and undoes the
+  same character while a peer lags behind GC grows a ledger past any fixed
+  count, and a snapshot the server cannot read back leaves the document
+  unloadable.
+- GC also shrinks ledgers. A removal whose cancel every replica knows is
+  dropped with that cancel: any change that arrives later knows both, so the
+  pair never decides anything again. Without this, a text revived by undo
+  kept every removal it ever had in each piece and each snapshot.
+- An undo or redo is propagated whenever an operation ran, as in JS: a cancel
+  that leaves a character removed changes the ledger but shows nothing.
+
+The server does not check an operation's own tickets against the change's
+actor (#2114), so a client that forges `executed_at` can cancel another
+actor's removal; main lets any restore clear any tombstone, so this is no
+looser. The pairing rule above is therefore enforced when a removal is
+recorded, not only assumed of honest clients.
+
+Operations do not change on the wire, so there is no capability to
+negotiate, but every replica has to run these rules to converge. An older
+SDK clears a tombstone outright on undo, removes whatever it knew the
+creation of, and collects regardless of the ledger, so it can disagree with
+an upgraded replica whenever undo meets a concurrent deletion, as it does
+today. The server builds snapshots with its own copy of these rules, so it
+is upgraded first and not rolled back once clients write ledgers: an older
+server drops `removal_events` when it re-encodes a document. An older
+reader of a snapshot ignores `removal_events` and sees `removed_at` as
+before.
+
+A recreated piece is anchored before the nearest surviving piece of its
+insertion after the gap. Anchoring before a later piece put the gap after the
+pieces in between, and a deletion that then spanned from the gap to one of
+them ran from its start to the end of the text.
+
+Not covered: that anchor can still land after text another insertion placed
+between the gap and that piece, so a replica that collected and one that did
+not can order the recreated piece differently. A tombstone held by two
+concurrent deletions that are never undone is never collected, whether or
+not anyone uses undo: either could still be undone, and only the tombstone
+can say that the other holds it. Such a tombstone stays registered, so it
+keeps counting toward `GarbageLen` and `docSize.GC` for the life of the
+document; releasing it needs a restore that can answer without the piece,
+which is a change to what the operation carries rather than to the ledger.
+Ledger tickets are also outside `DataSize`, so they do not count against
+`MaxSizePerDocument`: the size a node reports is charged once at
+registration and subtracted once at purge, while `recordRemoval` and
+`pruneStable` change a registered node's ledger in between, so charging it
+there would leave `docSize.GC` short or over by the difference.
+
+The held tombstone is a regression against `main`, which collects it, and
+is accepted here: it costs memory per overlapping deletion, where the ledger
+fixes text that diverges. Three ways to release it were tried and none
+does without a new signal:
+
+- Purging the content but keeping the node and its ledger converges and
+  needs no operation change, since a restore span carries the content. It
+  frees only the content bytes; the node, its ledger and `GarbageLen` stay,
+  and a snapshot needs a field for a node without content.
+- Refusing to cancel a removal every replica knows depends on each
+  replica's own GC vector, so replicas disagree on whether an undo did
+  anything. Making it deterministic needs the vector the undoer had seen on
+  the wire, and then undoing a deletion stops working a few syncs later.
+- Treating a detached actor's removals as final fails because detaching is
+  not final: an actor comes back under the same ID with its undo stack, and
+  an undo made offline is pushed after the detach.
+
+Releasing it needs a signal every replica receives in order with the
+changes, saying that a removal can no longer be undone.
+
+A run recreated after GC takes its attributes from the restore span, which
+is a snapshot from when the deletion ran. A style that reached the run
+concurrently with that deletion is missing from the span, so the replica
+that recreates the run revives it unstyled while one that held the
+tombstone keeps the style. `main` has the same gap with the undos in the
+other order; the ledger changes when a tombstone is collected, not how a
+run is recreated.
+
+### Tree.Edit Undo/Redo
+
+Tree uses a CRDT tree structure (`CRDTTree`) with identity-based positions
+(`CRDTTreePos = {parentID, leftSiblingID}`). Unlike Text, Tree positions involve
+a hierarchical structure with element nodes and text nodes.
+
+#### Reverse Operation
+
+When `Tree.edit([from, to], contents, splitLevel)` executes:
+1. `CRDTTree.edit()` returns the removed nodes, the pre-edit `fromIdx`, and a
+   `preTombstoned` set of node IDs that were already tombstoned **before** this
+   edit ran.
+2. The reverse operation:
+   - **For deletion (contents=undefined)**: deep-copies the removed nodes,
+     **filters out descendants whose IDs are in `preTombstoned`**, clears
+     tombstone markers on the surviving nodes, and stores them as
+     `reverseContents`. The filter is essential — without it, undoing a parent
+     delete would resurrect descendants that the user had independently
+     deleted in earlier operations, causing content accumulation across
+     undo/redo cycles in nested-edit scenarios (see Risks below).
+   - **For insertion**: stores no content (the reverse is a deletion).
+   - **For replacement**: combines both — deep-copies removed nodes and marks the
+     inserted content range for deletion.
+3. The reverse uses `tree.findPos(preEditFromIdx)` on the post-edit tree to get
+   the `CRDTTreePos` for the insertion point.
+
+```
+Forward:  edit([from, to], content)
+Reverse:  edit([from, from + insertedSize], removedNodes)
+```
+
+Since identity-preserving restore landed, step 2 is a fallback rather than the
+primary path: an edit that was merge- and split-free carries `restoreSpans` and
+`retombstoneSpans`, and its reverse revives the nodes under their original
+identity instead of re-inserting copies. The copy path still runs when the
+spans are incomplete — that is, when the edit involved a merge or a split — and
+in every SDK from 0.7.13 and earlier, which has no restore path at all.
+
+#### Identity of Copied Content
+
+The deep copy in step 2 keeps each node's `CRDTTreeNodeID`, so undoing a
+deletion re-inserts nodes under IDs the tree already uses for the tombstones.
+Two nodes then share one identity, and every position anchored at that ID
+becomes ambiguous — the failure that made a production document unopenable
+(yorkie#1927).
+
+The server drops such content when it replays the change and keeps the live
+node registered for the shared ID; see [tree](tree.md#one-node-per-treenodeid)
+for the rules and their limits. That contains the damage but does not remove
+it: an undo that took the copy path no longer restores its text, and until the
+same rules run in the SDKs, the client that issued it diverges from the server.
+
+The repair is to route every reverse the restore path can express through it.
+Issuing fresh IDs for the copies would stop the collision, but it keeps the
+copy-based model that duplicates content when undo ranges overlap and that
+Tree's reconciliation cannot converge (see Analysis: Overlapping Undo Content
+Duplication below) —
+a narrower fix for the identity problem alone, not for undo correctness. Until
+then the rules above are what keeps documents loadable.
+
+#### Position Representation
+
+The reverse operation stores both representations:
+- **CRDTTreePos**: identity-based positions for initial use
+- **Integer indices** (`fromIdx`, `toIdx`): for reconciliation adjustment
+
+At undo execution time, the integer indices are converted to `CRDTTreePos` via
+`tree.findPos()`, ensuring they reflect the current tree state.
+
+#### Concurrent Parent Deletion Guard
+
+In concurrent editing, a parent element may be deleted by another client while a
+child edit is being applied. When this happens:
+- Inserted content is immediately tombstoned (no visible effect)
+- `preEditFromIdx + insertedContentSize` may exceed the post-edit tree size
+
+The implementation guards against this: if the maximum needed index exceeds
+`tree.getSize()`, the reverse operation is skipped (the edit was effectively a
+no-op on visible content).
+
+#### Position Reconciliation
+
+Tree reconciliation follows the same six-case overlap logic as Text, but uses
+visible integer indices instead of RGA chain positions. Each `TreeEditOperation`
+exposes:
+- `getExecutedRanges()` (Go: `ExecutedRanges()`): the ranges a remote
+  execution changed, which reconciliation applies in order (see below)
+- `normalizePos()`: returns `[fromIdx, toIdx]`, the single-range fallback
+- `reconcileOperation(remoteFrom, remoteTo, contentLen)`: adjusts stored indices
+- `getContentSize()`: returns total inserted content size (sum of `paddedSize()`)
+
+When a remote change is applied, `Document` scans the History stacks and calls
+`reconcileTreeEdit()` for each pending `TreeEditOperation` targeting the same
+tree, once per range the remote op reports through `getExecutedRanges()`
+(Go: `ExecutedRanges()`). An ordinary edit reports its single
+`normalizePos()`/`getContentSize()` range. An identity-preserving restore or
+retombstone addresses nodes by ID, so its stored `fromIdx`/`toIdx` never
+describe where it landed; instead it reports one range per node that came
+back or left, each measured at that moment, so applying them in order
+reproduces the result. A single envelope over the op is not enough: reviving
+runs on both sides of a live node needs a different shift at each gap
+(yorkie#2222).
+
+#### Split Undo/Redo
+
+A split creates element boundaries without removing nodes. The reverse is a
+`splitLevel=0` **boundary deletion** that removes those tokens
+(`2 * splitLevel` per level), merging the split elements back. The reverse is
+a standard `TreeEditOperation`, so reconciliation and redo reuse the
+existing `splitLevel=0` paths.
+
+Both `splitLevel=1` and `splitLevel=2` are supported. See
+[tree-split-undo-redo.md](tree-split-undo-redo.md) for boundary-token
+mechanics, the undo/redo cycle, edge cases, pre-tombstoned descendant
+filtering, and the test matrix.
+
+**Implementation note:** `splitElement` recomputes `visibleSize` from children's
+`paddedSize()`. Since `IndexTreeNode.paddedSize()` does not return 0 for removed
+nodes, the recomputation must explicitly skip removed children to avoid inflating
+the parent's size when tombstoned text nodes are present in the left partition.
+
+#### Phase 2: Overlapping Range Reconciliation (superseded, see note)
+
+> **This section describes the reasoning current before `fa6cc513`
+> (2026-08-09) landed identity-preserving restore for Tree undo/redo.**
+> Reconciling overlapping ranges by integer index is still exactly as
+> asymmetric as described below, but a merge- and split-free edit's reverse
+> no longer needs that reconciliation to converge: it revives/re-removes
+> nodes by original identity instead, and `reconcileOperation`'s own guard
+> skips the index arithmetic entirely for an identity-addressed op. The
+> integer-index asymmetry below only still applies to the copy-reinsert
+> fallback (an edit that merged, split, or registered a GC pair past the
+> plain delete loop — see `TreeEditReverseInfo.SpansComplete` in the Go
+> port), which is not what an ordinary single-range Tree edit produces. Kept
+> for the reasoning; not a description of current behavior for Cases 3–6.
+
+The integer-index approach for Tree is **asymmetric** across clients for
+overlapping ranges (Cases 3–6). Unlike Text, where `normalizePos()` walks the
+physical RGA chain (identical on all clients), Tree's visible indices depend on
+local tombstone state, which differs between clients after concurrent deletions.
+
+This means overlapping reconciliation cases may produce divergent results. These
+cases were deferred to a "Phase 2" that never happened, which would have required
+either:
+- A tree-native `normalizePos()` that walks the CRDT node chain (analogous to
+  Text's RGA chain walking), or
+- A different position representation that is symmetric across clients.
+
+Non-overlapping cases (Case 1: left, Case 2: right) work correctly because they
+only involve index shifting, not range intersection.
+
+### Undo/Redo Flow
+
+#### Local Edit → Undo Entry
+
+```
+1. document.update(fn)
+2. fn modifies Clone via proxy
+3. Change created with operations
+4. Change.execute() on Root:
+   - Each operation produces a reverseOp
+   - reverseOps collected in array
+5. Presence reverse captured
+6. [reverseOps] pushed to undoStack
+7. redoStack cleared
+```
+
+#### Undo
+
+```
+1. document.history.undo()
+2. Pop [reverseOps] from undoStack
+3. Create new Change with reverseOps
+4. Execute on Clone, then on Root:
+   - Each reverseOp produces a re-reverseOp
+5. [re-reverseOps] pushed to redoStack
+6. Change added to LocalChanges for sync
+```
+
+#### Remote Change → Reconciliation
+
+```
+1. Remote change arrives
+2. Change.execute() on Root
+3. For each operation in the change:
+   a. If EditOperation (Text):
+      - Compute [from, to] via normalizePos()
+      - Call history.reconcileTextEdit(parentCreatedAt, from, to, contentLen)
+      - Scan undo/redo stacks, adjust matching EditOperations
+   b. If TreeEditOperation (Tree):
+      - Compute [from, to] via normalizePos()
+      - Call history.reconcileTreeEdit(parentCreatedAt, from, to, contentSize)
+      - Scan undo/redo stacks, adjust matching TreeEditOperations
+   c. If structural operation (Add/Remove/Set/Move):
+      - Call history.reconcileCreatedAt(prevCreatedAt, currCreatedAt)
+      - Update identity references in undo/redo stacks
+```
+
+### Risks and Mitigation
+
+**Risk: GC removes nodes needed for undo.**
+Undo operations hold deep copies of removed nodes (for Text content and Tree
+nodes). These copies are independent of the CRDT and survive garbage collection.
+However, if GC runs and a user then tries to undo, the CRDT positions referenced
+by the undo operation might point to collected nodes. Mitigation: undo operations
+use `findPos()` (index-based lookup) at execution time rather than relying on
+stale CRDT positions.
+
+**Risk: Tree reverseOp resurrects already-deleted descendants (single-client).**
+Without descendant filtering, a parent-delete's reverseOp deep-copies the
+parent and traverses every descendant — including ones the user had already
+tombstoned in earlier operations. Clearing tombstones on the entire subtree
+makes the redo bring back content the user never intended to restore.
+Repeating the cycle (type → undo chars → undo parent → redo parent → type
+more → undo chars → undo parent) produces compounding `reverseContents`
+across cycles, since each cycle re-tombstones nodes that the previous redo
+revived. Mitigation: the reverseOp generator drops descendants whose IDs are
+in `preTombstoned` (collected during `CRDTTree.edit()`), so only the nodes
+this edit actually transitioned from visible to tombstoned are resurrected
+on redo. This preserves CRDT identity and concurrent-edit semantics — the
+fix is purely in `toReverseOperation`.
+
+**Risk: Asymmetric reconciliation for overlapping Tree edits (superseded).**
+As described in "Phase 2: Overlapping Range Reconciliation" above, overlapping
+range reconciliation for Tree uses asymmetric integer indices. Resolved by
+identity-preserving restore (`fa6cc513`, 2026-08-09) for ordinary edits, which
+never reach this arithmetic; the asymmetry described here is still real for
+the copy-reinsert fallback (merge/split-adjacent edits), which is what
+`fa6cc513` un-skipped Cases 3–6 in `history_tree_test.ts` without needing to
+fix — those tests never exercise the fallback path either. Cases 1, 2, and 7
+(the non-overlapping and adjacent cases) never depended on this mitigation.
+
+**Risk: Stack overflow from deep undo chains.**
+The undo and redo stacks are capped at 50 entries (`MaxUndoRedoStackDepth`).
+Oldest entries are evicted when the cap is reached.
+
+### Current Status (as of 2026-08-16)
+
+#### Completed
+
+| Area | JS | Go | Notes |
+|------|----|----|-------|
+| Text single-client | ✅ | ✅ | insert, delete, replace, style. Go: `test/integration/history_text_test.go` (64 runtime instances) |
+| Text multi-client reconciliation | ✅ | ✅ | Convergence passes for all 7 cases (but see content correctness below). Go: `test/integration/history_text_reconcile_test.go` (9) |
+| Array undo | ✅ | ✅ | add, remove, move, set. Go: `test/integration/history_array_test.go` (84, 4 skipped — Array Set+Move, see below) |
+| Tree single-client (splitLevel=0) | ✅ | ✅ | All op types + chained ops |
+| Tree split undo/redo (L1 + L2) | ✅ | ✅ | Boundary-deletion reverse ops. See [tree-split-undo-redo.md](tree-split-undo-redo.md). Go: `test/integration/history_tree_split_test.go` (79, 1 skipped — `split-l2 → split-l2`, confirmed real in both SDKs) |
+| Tree multi-client (non-overlapping) | ✅ | ✅ | Cases 1, 2, 7 (left/right/adjacent) |
+| TreeStyleOperation single-client | ✅ | ✅ | setStyle, removeStyle undo/redo (PR #1221) |
+| TreeStyleOperation multi-client | ✅ | ✅ | style×style (18 tests), style×edit/split (24 tests) (PR #1221). Go: `test/integration/history_tree_test.go` |
+| Tree redo divergence | ✅ | ✅ | Fixed via CRDTTreePos-based undo execution + reconciliation disabled (branch `tree-undo-pos-normalization`) |
+| Tree reverseOp descendant filtering | ✅ | ✅ | `preTombstoned` set returned from `CRDTTree.edit()` and consumed by `toReverseOperation` — drops already-tombstoned descendants from `reverseContents` so nested edits (typing inside a later-deleted parent) don't accumulate across undo/redo cycles |
+| Tree reconciliation Cases 3-6 | ✅ (2026-08-09, `fa6cc513`) | ✅ | Un-skipped by identity-preserving restore, not by the index-arithmetic work this document's "Phase 2" section proposed — see the note there. Ordinary ranges never reach the arithmetic; the copy-reinsert fallback's asymmetry (still real) just isn't what these tests exercise. |
+| History layer, reverse-op generation, reconciliation | ✅ | ✅ (2026-08-16) | Full Go SDK port. See [undo-redo-go-port.md](undo-redo-go-port.md) for the port's design, what shipped versus what it predicted, and the parity audit. |
+
+Go's port target is v0.7.16; it deliberately reproduces every JS behavior in
+this table, including the known defects documented below (Overlapping undo
+content duplication, Array Set + Move, GC vs undo) and the "Analysis" sections
+that follow. A JS-only fix would widen, not close, the SDK gap — see
+[undo-redo-go-port.md](undo-redo-go-port.md)'s Non-Goals.
+
+#### Remaining Work
+
+| Priority | Item | Details |
+|----------|------|---------|
+| HIGH | Overlapping undo content duplication | Both Text and Tree produce duplicate content when overlapping deletes are both undone. Text converges but content is wrong; Tree diverges. See analysis below. **Update:** identity-preserving restore has since fixed the Text case (see the "Overlapping Undo Content Duplication" analysis note below) — the two `it.skip` correctness tests were stale in JS and pass, un-skipped, in Go's port (`test/integration/history_text_reconcile_test.go`'s `TestReconcileOverlappingUndoDuplicatesContent`). The Tree case remains open for the copy-reinsert fallback path. |
+| HIGH | Array Set + Move undo | Set after Move restores value at dead position. Requires proto change. See analysis below. 4 tests skipped in JS SDK, ported as 4 identical skips in Go (`test/integration/history_array_test.go`). |
+| MED | GC vs undo interaction | Issue #664. GC can purge elements still referenced by undo/redo stack. Identical in Go — see [undo-redo-go-port.md](undo-redo-go-port.md)'s Risks table. |
+| LOW | History reconciliation performance | O(n) stack scan → indexed lookup. Same in Go. |
+
+### Analysis: Overlapping Undo Content Duplication
+
+When two clients delete overlapping ranges and both undo, the shared
+content is re-inserted twice because each client's undo deep-copies
+removed content and re-inserts as new CRDT nodes.
+
+#### Concrete Example
+
+```
+Text: "0123456789"
+d1: delete [4,6) = "45"     →  undo: re-insert "45"
+d2: delete [2,8) = "234567" →  undo: re-insert "234567"
+
+Both undo → sync:
+  d1 re-inserts "45" (new RGA nodes)
+  d2 re-inserts "234567" (new RGA nodes, includes "45")
+  Result: "012345674589"  (expected "0123456789")
+```
+
+This affects **both Text and Tree**:
+- Text: convergence passes (both clients get same wrong content) —
+  correctness tests added in PR #1222, marked `skip`
+- Tree: convergence fails (asymmetric integer indices cause different
+  wrong content on each client) — Cases 3-6 skipped
+
+#### Root Cause
+
+The undo mechanism creates **new CRDT nodes** (deep-copy + re-insert)
+instead of restoring original tombstoned nodes. When undo ranges overlap,
+the overlapping content gets duplicated because each client independently
+creates its own copies.
+
+Text's reconciliation detects the overlap via the 6-case integer logic
+and adjusts positions, but this only ensures convergence — not content
+correctness. Tree's reconciliation fails entirely because `CRDTTreePos`
+identifies slots (parent + leftSibling), not specific nodes, making
+integer-based overlap detection asymmetric.
+
+#### Approaches Explored
+
+**Approach A: CRDTTreePos-based execution (Tree only)**
+
+Use `CRDTTreePos` as source of truth for Tree undo ops instead of integer
+indices. Disable integer-based reconciliation. Implemented in branch
+`tree-undo-pos-normalization`.
+
+Result: Fixes Tree redo divergence (1 test). Does NOT fix Cases 3-6
+(overlapping content duplication is a separate problem).
+
+Key finding: `CRDTTreePos(parentID, leftSiblingID)` identifies a **slot**
+between nodes, not a specific node. Concurrent inserts between the
+leftSibling and target change what node occupies the slot, making
+index-based overlap detection fundamentally incorrect for Tree.
+
+Also found: `refineTreePos` must preserve original `CRDTTreePos` when the
+leftSibling is tombstoned — the `toTreePos + fromTreePos` roundtrip
+corrupts the offset for removed siblings.
+
+**Approach B: Selective un-tombstone (Resurrect)**
+
+Instead of deep-copy re-insert, undo clears `removedAt` on nodes whose
+tombstone timestamp matches the forward delete's `editedAt`. Each node is
+resurrected at most once (LWW winner's undo restores shared nodes, loser
+skips).
+
+Result — single-client: **fully works** (59/59 tests including all chain
+combinations, replace undo/redo, triple same replace).
+
+Result — multi-client: **fails due to GC**. Sync triggers
+`garbageCollect(versionVector)` which physically purges tombstoned nodes
+before the remote undo arrives. Resurrected nodes no longer exist.
+
+Implementation required 3 new fields on `EditOperation` (`resurrectAt`,
+`retombstoneNodeIDs`, `resurrectDeletedAt`), 3 new methods on
+`RGATreeSplit` (`resurrect`, `retombstone`, `retombstoneByCreatedAt`),
+plus `CRDTRoot.unregisterGCPair`, protobuf schema changes, and Go server
+converter updates.
+
+**Why Resurrect fails for multi-client:**
+
+The GC contract says: if all replicas have seen a deletion (reflected in
+`minSyncedVersionVector`), the tombstoned node can be purged. But "all
+replicas have seen the deletion" does NOT mean "no replica will undo it."
+A client may undo after GC has already purged the target node.
+
+Issue #664 proposes protecting locally-referenced undo elements from GC,
+but this only covers the LOCAL undo stack. Client A cannot protect nodes
+referenced by Client B's undo stack — Client A doesn't know Client B's
+undo intent.
+
+The existing content-based re-insert avoids this problem entirely because
+it creates new nodes independent of GC state.
+
+#### Remaining Options
+
+Identity-preserving restore has since landed: `TreeRestoreSpan` carries each
+node's identity and value, `CRDTTree.Restore` un-tombstones the survivors and
+recreates the purged ones, and `Retombstone` is its redo counterpart. It is the
+primary reverse for merge- and split-free edits; the copy-based options below
+were written before it and remain relevant only to the edits that still fall
+back to copying.
+
+A recreated node is placed under the parent its span names. When that parent
+is gone, or is a text node that cannot hold children, the node is left
+unplaced and the restore still succeeds. No honest replica names a text
+parent, but spans arrive from the wire and the server stores a change before
+applying it, so an error there would fail every later rebuild of the document
+(#2168). Node kind never changes, so every replica skips the same span.
+Restore and retombstone likewise skip a span whose `IsText` flag disagrees
+with its `NodeType`. Such a span would recreate a node of the wrong kind, and
+an element carrying a value is invisible to the text lookup, so a repeat of
+the span would insert a second node under the same ID. It is skipped rather
+than rejected on decode because stored changes use the same decoder.
+
+A span is skipped for the same reason when the identity it would recreate is
+already held by a surviving node — the ID itself, or an offset inside a
+surviving text run of the same insertion. Nothing on the wire ties a span's ID
+to a purged node of its own insertion, and registering a node under a claimed
+ID overwrites the live registration, which leaves every later change that
+addresses the victim unapplicable. A replica that still holds the node
+resolves the span by un-tombstoning or ignoring it, so the replicas converge
+either way.
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Node-ID overlap detection | Extend undo op with removed node IDs; reconciliation compares node sets instead of index ranges. Content re-insert preserved (GC-safe). | Significant change to operation model and reconciliation logic. |
+| Reconciliation content trimming | Case 3: when undo fully contained by remote delete, clear content. | Only handles full containment; partial overlap (Cases 5-6) can't predict future undo intent. |
+| Identity-preserving restore (GC-recreate) — **implemented** | Undo un-tombstones surviving nodes and recreates purged nodes under their original IDs. GC-safe: carried values make restore independent of tombstone survival, extending Approach B past its multi-client GC failure. | Significant change to operation model on the scale of Approach B. Re-injecting nodes with past `createdAt` needs a convergence proof against the GC contract. |
+| Accept as known limitation | Document the issue; focus on other improvements. | Overlapping undo is uncommon in practice; users can work around. |
+
+### Analysis: Tree Redo Divergence (resolved)
+
+This divergence was fixed by switching Tree undo ops to CRDTTreePos-based
+execution and disabling integer reconciliation. See branch
+`tree-undo-pos-normalization`.
+
+Root cause: Tree used integer indices for redo positions, which are
+asymmetric across clients. `CRDTTreePos` directly identifies the target
+position, and `refineTreePos` at execution time handles tombstoned
+siblings by preserving the original position.
+
+```
+d1 redo: insert "X" via CRDTTreePos → same position on all clients
+d2 redo: delete "." via CRDTTreePos → same node on all clients
+→ Convergence restored
+```
+
+### Analysis: Array Set + Move Undo
+
+When an element is moved and then set (value replaced), undoing the set
+restores the value at the element's original dead position instead of
+its moved position.
+
+#### Concrete Example
+
+```
+Initial: [a, b, c, d, e]
+Move a after c: [b, c, a, d, e]
+Remove b: [c, a, d, e]            ← S2
+Set index 1 to 's': [c, s, d, e]  ← S3
+
+Undo set → expected S2: [c, a, d, e]
+Undo set → actual:      [a, c, d, e]   ← 'a' at front, not after 'c'
+```
+
+4 tests skipped in JS SDK (`move-*-set` combinations in
+`history_array_test.ts`).
+
+#### Root Cause
+
+`RGATreeList.set(createdAt, newValue, executedAt)` = `insertAfter(createdAt,
+newValue) + delete(createdAt)`. The `insertAfter` dual-lookup first checks
+`nodeMapByCreatedAt[createdAt]`, which finds the **original dead position**
+(before the move), not the element's current position.
+
+This is intentional for concurrent convergence — see
+`array-move-convergence.md`:
+
+> "Use the element's original position (via nodeMapByCreatedAt[createdAt])
+> so that Set always inserts at the position where the element was when
+> the Set operation was created, regardless of concurrent moves."
+
+The trade-off: the reverse `ArraySetOperation` also inserts at the dead
+position, because it uses the same `insertAfter(createdAt, ...)` path.
+
+#### Approaches Explored
+
+**Approach A: `prevPosCreatedAt` field on ArraySetOperation (local only)**
+
+Add a `prevPosCreatedAt` field to `ArraySetOperation`. The reverse op
+captures the element's current position before the set. When the reverse
+executes, it uses `prevPosCreatedAt` as the insertion anchor instead of
+`createdAt`.
+
+Result — single-client: **works** (`move-remove-set`, `move-move-set`
+pass). The restored value appears at the correct moved position.
+
+Result — multi-client: **fails** (`set-set` diverges). The
+`prevPosCreatedAt` is not serialized in protobuf. When the undo's change
+is synced to the other client, the reverse `ArraySetOperation` arrives
+without `prevPosCreatedAt`, falling back to `createdAt` (dead position).
+The two clients insert at different positions → divergence.
+
+**Approach B: `prevPosCreatedAt` in protobuf**
+
+Add `prev_pos_created_at` as an optional field to the `ArraySet` protobuf
+message. Forward set leaves it unset (convergence preserved). Reverse set
+(undo) populates it so the restored value goes to the correct position.
+
+```protobuf
+message Operation {
+  message ArraySet {
+    ...
+    TimeTicket prev_pos_created_at = 5; // position anchor for undo
+  }
+}
+```
+
+Both Go and JS SDKs serialize/deserialize the new field. Old clients
+ignore it (optional field, backward compatible).
+
+This is the **recommended approach**. It requires a coordinated proto +
+Go + JS change.
+
+**Approach C: Change `set` to use current position**
+
+Make `RGATreeList.set` use `elementMapByCreatedAt[createdAt].positionNode`
+for insertion instead of `nodeMapByCreatedAt[createdAt]`.
+
+**Rejected**: breaks concurrent convergence. Move→Set and Set→Move
+produce different positions because the element's "current" position
+depends on whether the Move has been applied yet.
+
+**Approach D: Composite reverse (ArraySetOperation + MoveOperation)**
+
+Return two reverse operations: a `ArraySetOperation` (restore value) +
+`MoveOperation` (correct position). Avoids proto changes.
+
+**Rejected**: the undo system runs `reconcileCreatedAt` on
+`ArraySetOperation` values, changing the element's `createdAt`. The
+paired `MoveOperation` references the old `createdAt`, which becomes
+stale. Keeping them synchronized requires complex bookkeeping.

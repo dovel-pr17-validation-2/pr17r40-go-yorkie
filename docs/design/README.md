@@ -1,0 +1,82 @@
+# Design Document
+
+New design documents should be based on [TEMPLATE.md](TEMPLATE.md).
+
+## Contents
+
+### Document & Presence
+
+- [Document-Client Lifecycle](document-client-lifecycle.md): States and transitions of documents and clients
+- [Document Editing](document-editing.md): Local and remote document editing mechanism
+- [Data Structure](data-structure.md): Data structures for root in document
+- [DocPresence](doc-presence.md): Data structure for presence in document
+- [Presence](presence.md): Dedicated presence for real-time user tracking
+- [Presenceless Document Option](disable-presence.md): Document-scoped `disable_presence` that permanently turns off presence storage and propagation for documents that never use it
+- [Presence Patch](presence-patch.md): Clients send only the changed top-level presence keys; the server folds them into a full put before storing, so every pulled presence change stays a put
+
+### CRDT
+
+- [Undo/Redo](undo-redo.md): Per-client undo/redo with reverse operations and position reconciliation
+- [Tree Split Undo/Redo](tree-split-undo-redo.md): Boundary-deletion reverse ops for `Tree.Edit` with `splitLevel >= 1` plus pre-tombstoned descendant filtering
+- [Undo/Redo Port to the Go SDK](undo-redo-go-port.md): Porting the JS SDK history layer to Go to close the behavioral gap between the two SDKs
+- [VersionVector](version-vector.md): VersionVector for GC and Resolving conflicts in CRDT
+- [VV Cleanup](vv-cleanup.md): Remove detached client's lamport from version vectors
+- [Disable GC on Attach](disable-gc-on-attach.md): Per-attachment opt-out from VV exchange and `minVV` tracking for GC-free workloads
+- [Garbage Collection](garbage-collection.md): Removing tombstones in CRDT
+- [Garbage Collection for Text Type](gc-for-text-type.md): Garbage collection for text type CRDT
+- [GC Registration on Set Conflict](gc-registration-on-set-conflict.md): Fix missing GC registration when new element loses LWW conflict
+- [Pre-Attach Ticket Re-issue](pre-attach-ticket-reissue.md): Re-issue the tickets a document minted before its first attach to the client's actor, so pre-attach elements get a unique `createdAt`
+- [Tree](tree.md): Tree data structure for tree-based rich text editor
+- [Identity of Inserted Tree Content](tree-content-identity.md): One ticket per inserted node, and what still lets two nodes share an ID
+- [Concurrent Merge and Split](concurrent-merge-split.md): Fix convergence bugs in concurrent tree merge/split operations
+- [Counter Dedup](counter-dedup.md): Counter dedup mode using HyperLogLog for high-volume idempotent counting
+- [Array Move Convergence](array-move-convergence.md): Fix convergence bugs in concurrent array move operations
+- [Range Deletion in SplayTree](range-deletion-in-splay-tree.md): Improving range deletion in SplayTree
+
+### Schema
+
+- [Schema Validation](schema-validation.md): Declarative document structure definition and real-time change validation
+- [Tree Schema](tree-schema.md): ProseMirror-compatible structural constraints for yorkie.Tree
+
+### Platform
+
+- [Sharded Cluster Mode](sharded-cluster-mode.md): Shard-based server cluster mode with consistent hashing
+- [MongoDB Sharding](mongodb-sharding.md): MongoDB sharding with sharding strategy considerations
+- [Membership Management](membership.md): Leader-member structure for managing cluster node lifecycle
+- [PubSub](pub-sub.md): Client-side event sharing with gRPC server-side stream and PubSub pattern
+- [Housekeeping](housekeeping.md): Background tasks for cleaning up documents and tombstones
+- [Document Epoch](document-epoch.md): Epoch-based detection and recovery for clients stale after compaction
+- [Offline-Resumable Attach](offline-resumable-attach.md): Stable actor decoupled from the per-session client row plus a resumable checkpoint, so a client's locally-persisted un-pushed changes replay after a reload
+- [Fine-grained Document Locking](fine-grained-document-locking.md): Fine-grained document locking for high concurrency
+- [OLAP Stack for MAU Tracking](olap-stack.md): Kafka and StarRocks pipeline behind the warehouse-backed project stats, starting from Monthly Active Users (MAU) tracking
+- [Cluster Service Authentication](cluster-service-auth.md): Shared secret authentication for inter-node cluster RPCs
+- [Admin API Credentials](admin-credentials.md): The two credentials of the project-scoped `AdminService` procedures — the project secret key and a session token plus `x-yorkie-project` — and the role each carries
+- [Watch Access Revalidation](watch-access-revalidation.md): Customer-triggered re-check of open Watch streams so a webhook revocation reaches them
+- [Watch Heartbeat](watch-heartbeat.md): Per-stream opt-in to the idle Watch heartbeat, so a server can run with it on without cutting off older clients
+- [Auth Webhook Presence-Only Packs](auth-webhook-presence-only.md): `presenceOnly` on change-pack attributes, so a webhook can allow presence while rejecting edits and removals
+- [Snapshot Overflow](snapshot-overflow.md): Handling Yorkie snapshots that exceed MongoDB's 16MB BSON limit
+- [Document Size Limit](document-size-limit.md): Server-side backstop on `MaxSizePerDocument`: a lagging gate on the snapshot's live size that refuses only growth
+- [Allowed Origins Wildcard](allowed-origins-wildcard.md): Wildcard pattern matching for project `AllowedOrigins` CORS check
+- [Project Stats Cache](project-stats-cache.md): Asynchronously refreshed cache for `ClientsCount` and `DocumentsCount` to keep `GetProjectStats` fast at large scale
+- [Project Stats Warehouse Materialized Views](project-stats-warehouse-mv.md): Daily HLL rollups that make the warehouse-backed `GetProjectStats` metrics independent of event volume
+- [Project Stats Long-Retention Windows](project-stats-long-retention.md): Decoupled daily HLL summary tables and a dual read that serve up-to-12-month windows after raw-event TTL is enabled
+- [Per-Project Channel Session TTL](per-project-channel-session-ttl.md): Per-project override for `ChannelSessionTTL` to tune the presence-count "feels occupied" effect
+
+### Development
+
+- [Local Enforcement Layer](local-enforcement-layer.md): The git hooks, Claude Code hooks and `make verify` target that gate a change before CI — all installed from a `$GIT_DIR` snapshot, so a branch cannot supply the hook code that runs on a reviewer's machine
+- [Agent Command Verbs](agent-command-verbs.md): Phased adoption of the `@claude <verb>` comment surface on issues and PRs, from a local self-review command to a gating review panel
+- [CI Lane Reports](ci-lane-reports.md): Per-lane machine-readable CI reports and the failure summariser that replace the 40 KB log tail the autonomous CI-fix loop was diagnosing from
+
+## Maintaining the Document
+
+For significant scope and complex new features, it is recommended to write a Design Document before starting any implementation work. On the other hand, we don't need to design documentation for small, simple features and bug fixes.
+
+Writing a design document for big features has many advantages:
+
+- It helps new visitors or contributors understand the inner workings or the architecture of the project.
+- We can agree with the community before code is written that could waste effort in the wrong direction.
+
+While working on your design, writing code to prototype your functionality may be useful to refine your approach.
+
+Authoring a design document follows the same [contribution flow](../../CONTRIBUTING.md) as a normal pull request, such as feature implementation or bug fixing.

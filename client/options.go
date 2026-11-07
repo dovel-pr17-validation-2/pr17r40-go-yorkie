@@ -1,0 +1,290 @@
+/*
+ * Copyright 2021 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package client
+
+import (
+	gotime "time"
+
+	"go.uber.org/zap"
+
+	"github.com/yorkie-team/yorkie/api/types"
+	"github.com/yorkie-team/yorkie/pkg/document/presence"
+	"github.com/yorkie-team/yorkie/pkg/document/yson"
+	"github.com/yorkie-team/yorkie/pkg/key"
+)
+
+// Option configures Options.
+type Option func(*Options)
+
+// Options configures how we set up the client.
+type Options struct {
+	// Key is the key of the client. It is used to identify the client.
+	Key string
+
+	// APIKey is the API key of the client.
+	APIKey string
+
+	// Token is the token of the client. Each request will be authenticated with this token.
+	Token string
+
+	// CertFile is the path to the certificate file.
+	CertFile string
+
+	// ServerNameOverride is the server name override.
+	ServerNameOverride string
+
+	// Logger is the Logger of the client.
+	Logger *zap.Logger
+
+	// MaxCallRecvMsgSize is the maximum message size in bytes the client can receive.
+	MaxCallRecvMsgSize int
+
+	// SyncLoopDuration is the duration of the sync loop.
+	// After each sync loop, the client waits for the duration to next sync.
+	// The default value is 50ms (same as JS SDK).
+	SyncLoopDuration gotime.Duration
+
+	// RetrySyncLoopDelay is how long the sync loop holds an attachment off
+	// after its sync failed. The loop keeps syncing the client's other
+	// attachments meanwhile.
+	// The default value is 1000ms.
+	RetrySyncLoopDelay gotime.Duration
+
+	// RejectedPushRetryDelay is how long the sync loop holds a document off
+	// after the server refused its push outright -- a pack that would carry
+	// the document past the project's size limit. Resending it at the loop's
+	// own cadence gets the same answer every few milliseconds, so the loop
+	// waits this much longer before trying again. It does try again: the
+	// refusal is the server's current answer, not a permanent one, since the
+	// limit can be raised and peers can shrink the document without this
+	// client being party to either. The document pulls nothing while it
+	// waits, because push and pull share one PushPull and the refused pack
+	// goes with every pull, so this delay is also how stale a refused
+	// document's view of its peers can get.
+	// The default value is 10 seconds.
+	RejectedPushRetryDelay gotime.Duration
+
+	// ChannelHeartbeatInterval is the interval of the presence heartbeat.
+	// The client sends a heartbeat to the server to refresh the presence TTL.
+	// The default value is 30 seconds.
+	ChannelHeartbeatInterval gotime.Duration
+
+	// WatchHeartbeatInterval is the interval at which this client asks the
+	// server to send a heartbeat on an idle Watch stream, so the client can
+	// tell a live stream from a half-open one. The server clamps the request
+	// to its own bounds and the client sizes its idle timeout against the
+	// value the server reports back, not this one.
+	//
+	// The default value is 20 seconds: short enough to notice a half-open
+	// stream in well under a minute, long enough to stay below the idle
+	// timeout of a typical proxy or load balancer. Set it to
+	// NoWatchHeartbeat to ask for no heartbeats and leave the stream without
+	// an idle timeout.
+	WatchHeartbeatInterval gotime.Duration
+}
+
+// NoWatchHeartbeat opts a client out of Watch heartbeats. It is distinct from
+// the zero value, which selects the default interval, because a duration
+// option cannot otherwise tell "unset" from "off".
+const NoWatchHeartbeat gotime.Duration = -1
+
+// WithAPIKey configures the API key of the client.
+func WithAPIKey(apiKey string) Option {
+	return func(o *Options) { o.APIKey = apiKey }
+}
+
+// WithToken configures the token of the client.
+func WithToken(token string) Option {
+	return func(o *Options) { o.Token = token }
+}
+
+// WithCertFile configures the certificate file of the client.
+func WithCertFile(certFile string) Option {
+	return func(o *Options) { o.CertFile = certFile }
+}
+
+// WithServerNameOverride configures the server name override of the client.
+func WithServerNameOverride(serverNameOverride string) Option {
+	return func(o *Options) { o.ServerNameOverride = serverNameOverride }
+}
+
+// WithLogger configures the Logger of the client.
+func WithLogger(logger *zap.Logger) Option {
+	return func(o *Options) { o.Logger = logger }
+}
+
+// WithMaxRecvMsgSize configures the maximum message size in bytes the client can receive.
+func WithMaxRecvMsgSize(maxRecvMsgSize int) Option {
+	return func(o *Options) { o.MaxCallRecvMsgSize = maxRecvMsgSize }
+}
+
+// WithSyncLoopDuration configures the duration of the sync loop.
+func WithSyncLoopDuration(duration gotime.Duration) Option {
+	return func(o *Options) { o.SyncLoopDuration = duration }
+}
+
+// WithRetrySyncLoopDelay configures how long the sync loop holds an
+// attachment off after its sync failed.
+func WithRetrySyncLoopDelay(delay gotime.Duration) Option {
+	return func(o *Options) { o.RetrySyncLoopDelay = delay }
+}
+
+// WithRejectedPushRetryDelay configures how long the sync loop holds a
+// document off after the server refused its push outright.
+func WithRejectedPushRetryDelay(delay gotime.Duration) Option {
+	return func(o *Options) { o.RejectedPushRetryDelay = delay }
+}
+
+// WithChannelHeartbeatInterval configures the interval of the channel heartbeat.
+func WithChannelHeartbeatInterval(interval gotime.Duration) Option {
+	return func(o *Options) { o.ChannelHeartbeatInterval = interval }
+}
+
+// WithWatchHeartbeatInterval configures the interval this client asks the
+// server to heartbeat its idle Watch streams at. Pass NoWatchHeartbeat to ask
+// for none.
+func WithWatchHeartbeatInterval(interval gotime.Duration) Option {
+	return func(o *Options) { o.WatchHeartbeatInterval = interval }
+}
+
+// DeactivateOption configures DeactivateOptions.
+type DeactivateOption func(*DeactivateOptions)
+
+// DeactivateOptions configures how we set up the document.
+type DeactivateOptions struct {
+	Asynchronous bool
+}
+
+// WithAsynchronous configures the asynchronous option of the document.
+func WithAsynchronous() DeactivateOption {
+	return func(o *DeactivateOptions) { o.Asynchronous = true }
+}
+
+// AttachOption configures AttachOptions.
+type AttachOption func(*AttachOptions)
+
+// AttachOptions configures how we set up the document.
+type AttachOptions struct {
+	IsRealtime  bool
+	Presence    presence.Data
+	InitialRoot yson.Object
+	Schema      string
+
+	// DisableGC declares that this attachment will not produce or consume
+	// tombstones. The server skips minVV tracking and omits the response
+	// VersionVector for this client. Use only with Counter / primitive
+	// workloads; misuse leads to undefined GC behavior on this client.
+	DisableGC bool
+
+	// DisablePresence declares that this document does not produce,
+	// consume, or store presence. Honored on first attach only; later
+	// attachers observe the server-fixated value carried in the attach
+	// response. See docs/tasks/active/20260616-presenceless-document-option-todo.md.
+	DisablePresence bool
+}
+
+// WithRealtimeSync configures the manual sync of the client.
+func WithRealtimeSync() AttachOption {
+	return func(o *AttachOptions) { o.IsRealtime = true }
+}
+
+// WithPresence configures the presence of the client.
+func WithPresence(presence presence.Data) AttachOption {
+	return func(o *AttachOptions) { o.Presence = presence }
+}
+
+// WithInitialRoot sets the initial root of the document. Values in the initial
+// root will be discarded if the key already exists in the document. If some
+// keys are not in the document, they will be added.
+func WithInitialRoot(root yson.Object) AttachOption {
+	return func(o *AttachOptions) {
+		o.InitialRoot = root
+	}
+}
+
+// WithSchema configures the schema of the document.
+func WithSchema(schema string) AttachOption {
+	return func(o *AttachOptions) { o.Schema = schema }
+}
+
+// WithDisableGC declares that this attachment will not produce or consume
+// tombstones. The server skips minVV tracking and omits the response
+// VersionVector for this client. Use only with Counter / primitive
+// workloads; misuse leads to undefined GC behavior on this client. See
+// docs/design/disable-gc-on-attach.md.
+//
+// This option controls the wire contract with the server. It is distinct
+// from the package-level document.WithDisableGC option, which disables
+// the document's local GC pass regardless of what the server sends.
+func WithDisableGC() AttachOption {
+	return func(o *AttachOptions) { o.DisableGC = true }
+}
+
+// WithDisablePresence declares that this document does not produce, consume,
+// or store presence. The server fixates the flag on first attach (via
+// $setOnInsert on DocInfo) and returns the persisted value in the attach
+// response; clients gate on the response value rather than the requested
+// one so a single misconfigured client cannot break the guarantee.
+func WithDisablePresence() AttachOption {
+	return func(o *AttachOptions) { o.DisablePresence = true }
+}
+
+// AttachChannelOption configures AttachChannelOptions.
+type AttachChannelOption func(*AttachChannelOptions)
+
+// AttachChannelOptions configures how we set up the channel.
+type AttachChannelOptions struct {
+	// IsRealtime determines whether the channel is in realtime mode.
+	// If true, the client will watch for channel changes via streaming.
+	// If false, the client must manually refresh to get count updates.
+	IsRealtime bool
+}
+
+// WithChannelRealtimeSync configures the channel to be in realtime mode.
+func WithChannelRealtimeSync() AttachChannelOption {
+	return func(o *AttachChannelOptions) { o.IsRealtime = true }
+}
+
+// DetachOption configures DetachOptions.
+type DetachOption func(*DetachOptions)
+
+// DetachOptions configures how we set up the document.
+type DetachOptions struct {
+}
+
+// SyncOptions is an option for sync. It contains the key of the resource to
+// sync and the sync mode. It can be used for both documents and channels.
+type SyncOptions struct {
+	key  key.Key
+	mode types.SyncMode
+}
+
+// WithKey creates a SyncOptions with the given resource key.
+func WithKey(k key.Key) SyncOptions {
+	return SyncOptions{
+		key:  k,
+		mode: types.SyncModePushPull,
+	}
+}
+
+// WithPushOnly returns a SyncOptions with the sync mode set to PushOnly.
+func (o SyncOptions) WithPushOnly() SyncOptions {
+	return SyncOptions{
+		key:  o.key,
+		mode: types.SyncModePushOnly,
+	}
+}

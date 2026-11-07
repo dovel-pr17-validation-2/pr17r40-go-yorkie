@@ -1,0 +1,584 @@
+/*
+ * Copyright 2023 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package json
+
+import (
+	"slices"
+	"strings"
+
+	"github.com/yorkie-team/yorkie/pkg/document/change"
+	"github.com/yorkie-team/yorkie/pkg/document/crdt"
+	"github.com/yorkie-team/yorkie/pkg/document/operations"
+	"github.com/yorkie-team/yorkie/pkg/document/time"
+	"github.com/yorkie-team/yorkie/pkg/document/yson"
+	"github.com/yorkie-team/yorkie/pkg/errors"
+	"github.com/yorkie-team/yorkie/pkg/index"
+)
+
+var (
+	// ErrEmptyTextNode is returned when there's empty string value in text node
+	ErrEmptyTextNode = errors.InvalidArgument("text node cannot have empty value")
+
+	// ErrMixedNodeType is returned when there're element node and text node inside contents array
+	ErrMixedNodeType = errors.InvalidArgument("element node and text node cannot be passed together")
+
+	// ErrIndexBoundary is returned when from index is bigger than to index
+	ErrIndexBoundary = errors.InvalidArgument("from should be less than or equal to to")
+
+	// ErrPathLenDiff is returned when two paths have different length
+	ErrPathLenDiff = errors.InvalidArgument("both paths should have same length")
+
+	// ErrEmptyPath is returned when there's empty path
+	ErrEmptyPath = errors.InvalidArgument("path should not be empty")
+
+	// ErrInvalidSplitLevel is returned when a negative split level is given.
+	// A split level counts the element boundaries the edit creates, so it has
+	// no meaning below zero.
+	ErrInvalidSplitLevel = errors.InvalidArgument("split level should not be negative")
+)
+
+// TreeNode is a node of Tree.
+type TreeNode = yson.TreeNode
+
+// Tree is a CRDT-based tree structure that is used to represent the document
+// tree of text-based editor such as ProseMirror.
+type Tree struct {
+	initialRoot *TreeNode
+	*crdt.Tree
+	context *change.Context
+}
+
+// NewTree creates a new instance of Tree.
+func NewTree(root ...*TreeNode) *Tree {
+	var t Tree
+	if len(root) > 0 {
+		t.initialRoot = root[0]
+	}
+	return &t
+}
+
+// Initialize initializes the Tree by the given context and tree.
+func (t *Tree) Initialize(ctx *change.Context, tree *crdt.Tree) *Tree {
+	t.Tree = tree
+	t.context = ctx
+	return t
+}
+
+// validateTextNode make sure that text node have non-empty string value
+func validateTextNode(treeNode TreeNode) error {
+	if len(treeNode.Value) == 0 {
+		return ErrEmptyTextNode
+	}
+
+	return nil
+}
+
+// validateTextNode make sure that treeNodes consist of only one of the two types (text or element)
+func validateTreeNodes(treeNodes []*TreeNode) error {
+	firstTreeNodeType := treeNodes[0].Type
+
+	if firstTreeNodeType == index.TextNodeType {
+		for _, treeNode := range treeNodes {
+			if treeNode.Type != index.TextNodeType {
+				return ErrMixedNodeType
+			}
+
+			if err := validateTextNode(*treeNode); err != nil {
+				return err
+			}
+		}
+
+	} else {
+		for _, treeNode := range treeNodes {
+			if treeNode.Type == index.TextNodeType {
+				return ErrMixedNodeType
+			}
+		}
+	}
+
+	return nil
+}
+
+// Edit edits this tree with the given node.
+func (t *Tree) Edit(fromIdx, toIdx int, content *TreeNode, splitLevel int) bool {
+	if fromIdx > toIdx {
+		panic(ErrIndexBoundary)
+	}
+
+	fromPos, err := t.Tree.FindPos(fromIdx)
+	if err != nil {
+		panic(err)
+	}
+	toPos, err := t.Tree.FindPos(toIdx)
+	if err != nil {
+		panic(err)
+	}
+
+	return t.edit(fromPos, toPos, []*TreeNode{content}, splitLevel)
+}
+
+// EditBulk edits this tree with the given nodes.
+func (t *Tree) EditBulk(fromIdx, toIdx int, contents []*TreeNode, splitLevel int) bool {
+	if fromIdx > toIdx {
+		panic(ErrIndexBoundary)
+	}
+
+	fromPos, err := t.Tree.FindPos(fromIdx)
+	if err != nil {
+		panic(err)
+	}
+	toPos, err := t.Tree.FindPos(toIdx)
+	if err != nil {
+		panic(err)
+	}
+
+	return t.edit(fromPos, toPos, contents, splitLevel)
+}
+
+// EditByPath edits this tree with the given path and nodes.
+func (t *Tree) EditByPath(fromPath []int, toPath []int, content *TreeNode, splitLevel int) bool {
+	if len(fromPath) != len(toPath) {
+		panic(ErrPathLenDiff)
+	}
+
+	if len(fromPath) == 0 || len(toPath) == 0 {
+		panic(ErrEmptyPath)
+	}
+
+	fromPos, err := t.Tree.PathToPos(fromPath)
+	if err != nil {
+		panic(err)
+	}
+	toPos, err := t.Tree.PathToPos(toPath)
+	if err != nil {
+		panic(err)
+	}
+
+	return t.edit(fromPos, toPos, []*TreeNode{content}, splitLevel)
+}
+
+// EditBulkByPath edits this tree with the given path and nodes.
+func (t *Tree) EditBulkByPath(fromPath []int, toPath []int, contents []*TreeNode, splitLevel int) bool {
+	if len(fromPath) != len(toPath) {
+		panic(ErrPathLenDiff)
+	}
+
+	if len(fromPath) == 0 || len(toPath) == 0 {
+		panic(ErrEmptyPath)
+	}
+
+	fromPos, err := t.Tree.PathToPos(fromPath)
+	if err != nil {
+		panic(err)
+	}
+	toPos, err := t.Tree.PathToPos(toPath)
+	if err != nil {
+		panic(err)
+	}
+
+	return t.edit(fromPos, toPos, contents, splitLevel)
+}
+
+// Style sets the attributes to the elements of the given range.
+func (t *Tree) Style(fromIdx, toIdx int, attributes map[string]string) bool {
+	if fromIdx > toIdx {
+		panic("from should be less than or equal to to")
+	}
+
+	if len(attributes) == 0 {
+		return true
+	}
+
+	fromPos, err := t.Tree.FindPos(fromIdx)
+	if err != nil {
+		panic(err)
+	}
+	toPos, err := t.Tree.FindPos(toIdx)
+	if err != nil {
+		panic(err)
+	}
+
+	ticket := t.context.IssueTimeTicket()
+	pairs, size, _, err := t.Tree.Style(fromPos, toPos, attributes, ticket, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, pair := range pairs {
+		t.context.RegisterGCPair(pair)
+	}
+
+	t.context.Acc(size.Live)
+	t.context.AccGC(size.GC)
+
+	t.context.Push(operations.NewTreeStyle(
+		t.CreatedAt(),
+		fromPos,
+		toPos,
+		attributes,
+		ticket,
+	))
+
+	return true
+}
+
+// RemoveStyle sets the attributes to the elements of the given range.
+func (t *Tree) RemoveStyle(fromIdx, toIdx int, attributesToRemove []string) bool {
+	if fromIdx > toIdx {
+		panic("from should be less than or equal to to")
+	}
+
+	if len(attributesToRemove) == 0 {
+		return true
+	}
+
+	fromPos, err := t.Tree.FindPos(fromIdx)
+	if err != nil {
+		panic(err)
+	}
+	toPos, err := t.Tree.FindPos(toIdx)
+	if err != nil {
+		panic(err)
+	}
+
+	ticket := t.context.IssueTimeTicket()
+	pairs, size, _, err := t.Tree.RemoveStyle(fromPos, toPos, attributesToRemove, ticket, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// RegisterGCPair moves both halves: the attribute enters GC and leaves
+	// Live in the same call. It did not always, and this path forgot the
+	// second half -- the clone's Live then kept every attribute a removeStyle
+	// ever tombstoned, and the clone's ledger is what MaxSizeLimit reads, so
+	// toggling one key rejected edits on a document far under the limit.
+	for _, pair := range pairs {
+		t.context.RegisterGCPair(pair)
+	}
+
+	t.context.Acc(size.Live)
+	t.context.AccGC(size.GC)
+
+	t.context.Push(operations.NewTreeStyleRemove(
+		t.CreatedAt(),
+		fromPos,
+		toPos,
+		attributesToRemove,
+		ticket,
+	))
+
+	return true
+}
+
+// StyleByPath sets the attributes to the elements of the given path range.
+func (t *Tree) StyleByPath(fromPath []int, toPath []int, attributes map[string]string) bool {
+	if len(fromPath) != len(toPath) {
+		panic(ErrPathLenDiff)
+	}
+
+	if len(fromPath) == 0 || len(toPath) == 0 {
+		panic(ErrEmptyPath)
+	}
+
+	// Same contract as Style: a range given backwards is a caller error, not
+	// an empty range. Paths of equal length compare in document order.
+	if slices.Compare(fromPath, toPath) > 0 {
+		panic(ErrIndexBoundary)
+	}
+
+	if len(attributes) == 0 {
+		return true
+	}
+
+	fromPos, err := t.Tree.PathToPos(fromPath)
+	if err != nil {
+		panic(err)
+	}
+	toPos, err := t.Tree.PathToPos(toPath)
+	if err != nil {
+		panic(err)
+	}
+
+	ticket := t.context.IssueTimeTicket()
+	pairs, size, _, err := t.Tree.Style(fromPos, toPos, attributes, ticket, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, pair := range pairs {
+		t.context.RegisterGCPair(pair)
+	}
+
+	t.context.Acc(size.Live)
+	t.context.AccGC(size.GC)
+
+	t.context.Push(operations.NewTreeStyle(
+		t.CreatedAt(),
+		fromPos,
+		toPos,
+		attributes,
+		ticket,
+	))
+
+	return true
+}
+
+// RemoveStyleByPath removes the attributes from the elements of the given path range.
+func (t *Tree) RemoveStyleByPath(fromPath []int, toPath []int, attributesToRemove []string) bool {
+	if len(fromPath) != len(toPath) {
+		panic(ErrPathLenDiff)
+	}
+
+	if len(fromPath) == 0 || len(toPath) == 0 {
+		panic(ErrEmptyPath)
+	}
+
+	// Same contract as RemoveStyle: a range given backwards is a caller
+	// error, not an empty range.
+	if slices.Compare(fromPath, toPath) > 0 {
+		panic(ErrIndexBoundary)
+	}
+
+	if len(attributesToRemove) == 0 {
+		return true
+	}
+
+	fromPos, err := t.Tree.PathToPos(fromPath)
+	if err != nil {
+		panic(err)
+	}
+	toPos, err := t.Tree.PathToPos(toPath)
+	if err != nil {
+		panic(err)
+	}
+
+	ticket := t.context.IssueTimeTicket()
+	pairs, size, _, err := t.Tree.RemoveStyle(fromPos, toPos, attributesToRemove, ticket, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// RegisterGCPair moves both halves: the attribute enters GC and leaves
+	// Live in the same call. It did not always, and this path forgot the
+	// second half -- the clone's Live then kept every attribute a removeStyle
+	// ever tombstoned, and the clone's ledger is what MaxSizeLimit reads, so
+	// toggling one key rejected edits on a document far under the limit.
+	for _, pair := range pairs {
+		t.context.RegisterGCPair(pair)
+	}
+
+	t.context.Acc(size.Live)
+	t.context.AccGC(size.GC)
+
+	t.context.Push(operations.NewTreeStyleRemove(
+		t.CreatedAt(),
+		fromPos,
+		toPos,
+		attributesToRemove,
+		ticket,
+	))
+
+	return true
+}
+
+// Len returns the length of this tree.
+func (t *Tree) Len() int {
+	return t.IndexTree.Root().Len()
+}
+
+// edit edits the tree with the given nodes.
+func (t *Tree) edit(fromPos, toPos *crdt.TreePos, contents []*TreeNode, splitLevel int) bool {
+	// Refused here rather than in each of Edit/EditBulk/EditByPath/
+	// EditBulkByPath: this is the single funnel all four reach, and the only
+	// place a TreeEdit carrying a split level is constructed, so a fifth entry
+	// point cannot bypass it. Ahead of IssueTimeTicket so a refused edit
+	// consumes no delimiter.
+	//
+	// A negative level is inert on the forward path (the split loop does
+	// nothing for a non-positive level), but it sizes the boundary-deletion
+	// reverse as 2*splitLevel, which would run backwards. The decoder rejects
+	// one arriving from a peer; this stops well-behaved code minting one the
+	// server would then refuse.
+	if splitLevel < 0 {
+		panic(ErrInvalidSplitLevel)
+	}
+
+	ticket := t.context.IssueTimeTicket()
+
+	var nodes []*crdt.TreeNode
+
+	if len(contents) != 0 && contents[0] != nil {
+		if err := validateTreeNodes(contents); err != nil {
+			panic(err)
+		}
+
+		if contents[0].Type == index.TextNodeType {
+			var value strings.Builder
+
+			for _, content := range contents {
+				value.WriteString(content.Value)
+			}
+
+			nodes = append(nodes, crdt.NewTreeNode(crdt.NewTreeNodeID(ticket, 0), index.TextNodeType, nil, value.String()))
+		} else {
+			for i, content := range contents {
+				// Each node needs its own identity: positions anchor by id, and
+				// two nodes under one id make every position anchored there
+				// ambiguous. The first content keeps the ticket issued above so
+				// that a single-content edit — every edit made through Edit,
+				// rather than EditBulk — assigns the ids it always has.
+				nodeTicket := ticket
+				if i > 0 {
+					nodeTicket = t.context.IssueTimeTicket()
+				}
+
+				var attributes *crdt.RHT
+				if content.Attributes != nil {
+					attributes = crdt.NewRHT()
+					for key, val := range content.Attributes {
+						attributes.Set(key, val, nodeTicket)
+					}
+				}
+				node := crdt.NewTreeNode(crdt.NewTreeNodeID(nodeTicket, 0), content.Type, attributes, content.Value)
+
+				for _, child := range content.Children {
+					if err := buildDescendants(t.context, child, node); err != nil {
+						panic(err)
+					}
+				}
+
+				nodes = append(nodes, node)
+			}
+		}
+	}
+
+	var clones []*crdt.TreeNode
+	if len(nodes) != 0 {
+		for _, node := range nodes {
+			var clone *crdt.TreeNode
+
+			clone, err := node.DeepCopy()
+			if err != nil {
+				panic(err)
+			}
+
+			clones = append(clones, clone)
+		}
+	}
+
+	ticket = t.context.LastTimeTicket()
+	// Splitting an element creates nodes that need tickets. Record the ones
+	// issued so the operation can carry them: every other replica then uses
+	// them instead of reconstructing them from the operation, which it cannot
+	// do correctly once content has descendants. See
+	// docs/design/tree-content-identity.md.
+	var splitTickets []*time.Ticket
+	issueSplitTicket := func() *time.Ticket {
+		issued := t.context.IssueTimeTicket()
+		splitTickets = append(splitTickets, issued)
+		return issued
+	}
+	pairs, diff, _, err := t.Tree.Edit(
+		fromPos,
+		toPos,
+		clones,
+		splitLevel,
+		ticket,
+		issueSplitTicket,
+		nil,
+		// This runs on the clone and discards the reverse info; the reverse
+		// itself is built when the operation executes on the real root under
+		// OpSourceLocal. Asked for anyway, so the clone and the root take the
+		// same path through Edit -- including the same error cases.
+		true,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, pair := range pairs {
+		t.context.RegisterGCPair(pair)
+	}
+
+	t.context.Acc(diff)
+
+	edit := operations.NewTreeEdit(
+		t.CreatedAt(),
+		fromPos,
+		toPos,
+		nodes,
+		splitLevel,
+		ticket,
+	)
+	edit.SetSplitTickets(splitTickets)
+	t.context.Push(edit)
+
+	return true
+}
+
+// buildRoot converts the given node to a CRDT-based tree node. If the given
+// node is nil, it creates a default root node.
+func buildRoot(ctx *change.Context, node *TreeNode, createdAt *time.Ticket) *crdt.TreeNode {
+	if node == nil {
+		return crdt.NewTreeNode(crdt.NewTreeNodeID(createdAt, 0), yson.DefaultRootNodeType, nil)
+	}
+
+	root := crdt.NewTreeNode(crdt.NewTreeNodeID(createdAt, 0), node.Type, nil)
+	for _, child := range node.Children {
+		if err := buildDescendants(ctx, child, root); err != nil {
+			panic(err)
+		}
+	}
+
+	return root
+}
+
+// buildDescendants converts the given node to a CRDT-based tree node.
+func buildDescendants(ctx *change.Context, n TreeNode, parent *crdt.TreeNode) error {
+	if n.Type == index.TextNodeType {
+
+		if err := validateTextNode(n); err != nil {
+			return err
+		}
+
+		treeNode := crdt.NewTreeNode(crdt.NewTreeNodeID(ctx.IssueTimeTicket(), 0), n.Type, nil, n.Value)
+		return parent.Append(treeNode)
+	}
+
+	ticket := ctx.IssueTimeTicket()
+
+	var attributes *crdt.RHT
+	if n.Attributes != nil {
+		attributes = crdt.NewRHT()
+		for key, val := range n.Attributes {
+			attributes.Set(key, val, ticket)
+		}
+	}
+
+	treeNode := crdt.NewTreeNode(crdt.NewTreeNodeID(ticket, 0), n.Type, attributes)
+	if err := parent.Append(treeNode); err != nil {
+		return err
+	}
+
+	for _, child := range n.Children {
+		if err := buildDescendants(ctx, child, treeNode); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}

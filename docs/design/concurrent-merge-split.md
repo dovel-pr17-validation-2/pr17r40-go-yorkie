@@ -1,0 +1,1312 @@
+---
+title: concurrent-merge-split
+target-version: 0.7.5
+---
+
+# Concurrent Merge and Split
+
+## Problem
+
+When two clients concurrently perform merge or split operations on the same
+tree region, replicas diverge after synchronization.
+
+### Goals
+
+- Fix convergence bugs in concurrent merge/split.
+- Preserve backward compatibility: no protobuf or protocol changes (except
+  persisting `MergedFrom`/`MergedAt` on snapshot — backwards-compatible).
+
+### Non-Goals
+
+- Undo/redo for merge/split (deferred per `undo-redo.md` Phase 2).
+- General-purpose `Tree.Move` operation (Phase 2).
+
+## Text vs Element ID Asymmetry
+
+Understanding this asymmetry is essential for the rest of the document.
+
+- **Text split nodes** have deterministic IDs: same `CreatedAt` + offset.
+  Any client that knows the original node can resolve the split via
+  `findFloorNode`. No discovery problem.
+- **Element split nodes** have non-deterministic IDs: each split creates a
+  new ticket via `issueTimeTicket`. A client that didn't witness the split
+  cannot find the product by ID alone.
+- **`InsNextID`/`InsPrevID` chain** is the sole discovery mechanism for
+  concurrent element split products. `SplitElement` links the new (right)
+  node into this doubly-linked list. Every phase that must account for
+  concurrent element splits walks this chain.
+
+This asymmetry is why Phase 7 (Split) needs per-iteration sibling
+advancement in the recursive loop — each ancestor-level element split
+produces a new undiscoverable ID.
+
+## Edit Execution Flow
+
+```text
+Edit(from, to, contents, splitLevel)
+  ├── Phase 1: Position Resolution (FindTreeNodesWithSplitText)
+  ├── Phase 2: Split Sibling Advance (advancePastUnknownSplitSiblings)
+  ├── Phase 3: Range Narrowing (cross-parent boundary)
+  ├── Phase 4: Range Collection (collectBetween)
+  ├── Phase 5: Delete — tombstone collected nodes
+  ├── Phase 6: Merge — move children to fromParent, set mergedInto
+  │     └── Delete Propagation to merge-moved children
+  ├── Phase 7: Split — SplitElement for splitLevel > 0
+  └── Phase 8: Insert — with parent-deletion guard + merge redirect
+```
+
+## Phase 1: Position Resolution
+
+**Function**: `FindTreeNodesWithSplitText`
+
+Resolves `CRDTTreePos` (parent ID + left sibling ID) into concrete tree
+node pointers. Two concurrent issues can corrupt resolution results.
+
+### §1.1 Merge-Tombstone Redirect
+
+When the resolved parent has been tombstoned by a concurrent merge,
+its children have already been moved to the merge destination. The
+`mergedInto` forwarding pointer redirects resolution to that
+destination. The pointer is kept flat across chained merges (§6.3), so
+it always resolves to the final live target in a single hop.
+
+`mergedInto` is a runtime cache on `TreeNode`, set during merge
+execution and rebuilt from the persisted `MergedFrom` field on
+snapshot load via `rebuildMergeState`. This enables a fast nil-check
+on the hot path without persisting a separate field.
+
+This redirect fires only for a *left-most* position, whose anchor is
+the tombstoned parent itself. A position with a left-sibling anchor
+resolves through the normal path, because the merge moves the sibling
+(live or tombstone) into the target — see §6.1.
+
+**Known limitation**: the left-most redirect returns its boundary
+directly, *before* the step-04 RGA `CreatedAt` tie-break. So when two
+clients concurrently insert at the left-most position of the *same*
+merged-away parent, their relative order is decided by application order,
+not by `CreatedAt`, and replicas diverge. This is independent of chained
+merges (it reproduces on a single merge) and predates Fix 20; a
+left-sibling-anchored insert is unaffected because it takes the normal
+path. Fixing it means routing the left-most redirect through step 04
+rather than returning early — deferred, tracked as a follow-up.
+
+### §1.2 Inverted Range Guard
+
+**Function**: `traverseInPosRange`
+
+When a merge redirect places the `to` position before `from` in tree
+order, the range is inverted. This is treated as a no-op
+(`if fromIdx > toIdx { return nil }`).
+
+## Phase 2: Split Sibling Advance
+
+**Function**: `advancePastUnknownSplitSiblings`
+
+After position resolution, `fromLeft`/`toLeft` may point to an element
+that has been split by a concurrent operation. The split product
+(right sibling) is unknown to the editor — its `CreatedAt` is not in
+the editor's version vector.
+
+This phase walks the `InsNextID` chain from the resolved left node,
+advancing past element split siblings that are unknown to the editor.
+Skip when `leftNode == parent` (leftmost position — no left sibling
+to advance from).
+
+This prevents multi-level split mispositioning and side-by-side
+insert/delete errors. Without it, operations target the original
+element instead of landing after all its split products.
+
+The same advance logic is applied in `Style` and `RemoveStyle` entry
+points (see Phase 9).
+
+**Options** (used in Phase 7's recursive split loop):
+- `relaxParentCheck`: skip parent equality check at ancestor
+  iterations, where a concurrent ancestor split may move siblings to
+  different parents.
+- `skipActorID`: stop at siblings created by the current change's
+  actor, since same-actor siblings are own split products, not
+  concurrent ones.
+
+## Phase 3: Range Narrowing
+
+**Location**: `Edit`, after position resolution
+
+When `fromParent` and `toParent` are different nodes — the from
+position is in the original parent while the to position landed in a
+split sibling — the `collectBetween` traversal range crosses parent
+boundaries and may include content from concurrent split products that
+wasn't in the editor's original range.
+
+Follow `fromLeft`'s `InsNextID` chain to find a split sibling whose
+parent is `toParent`, and use that sibling as the `collectBetween`
+from-position.
+
+Skip the narrowing when `toLeft == toParent`, the to position being the
+leftmost child position (offset 0) of `toParent`. Joining two paragraphs
+right after an Enter in the middle of a span names exactly that: from the
+end of the first paragraph to the start of the second. The split sibling in
+`toParent` is then its first child, so the narrowed from-position would lie
+after the to-position, a backwards range that collects nothing and so
+drops the merge. The JS SDK
+has had this guard since yorkie-js-sdk#1237.
+
+Only the `collectBetween` range is narrowed. The original
+`fromParent`/`fromLeft` are preserved for merge, split, and insert
+steps so that content is inserted at the editor's intended position.
+On the other replica, §7.3 (Boundary Insert Migration) handles the
+symmetric placement.
+
+VV-independent: relies only on `InsNextID` chain and parent pointer
+comparison, preserving clone/root consistency.
+
+## Phase 4: Range Collection
+
+**Function**: `collectBetween`
+
+Walks the resolved range to build lists of nodes to delete and merge.
+Three concurrent issues require special handling.
+
+### §4.1 Split Sibling Cascade
+
+When collecting an element for deletion, follow its `InsNextID` chain
+to include split siblings unknown to the editor's version vector.
+These siblings are part of the same logical element and must be
+deleted together. Element-only: text splits use deterministic
+offset-based IDs that `findFloorNode` already resolves.
+
+The walk passes a sibling the editor **knew** only if the editor saw it
+gone: removed by a change the editor knew (merged back into the deleted
+element, for instance), or enclosed whole by this same delete. What lies
+past such a sibling was inside the deleted element or the deleted range
+for the editor too. Any other known sibling ends the walk. The chain is in
+document order: a split product lands directly after the node it was split
+off, or under §7.8 after the same-boundary products ordered ahead of it. So
+an unknown sibling past a known one that the editor did not see removed
+holds content the editor saw inside that sibling, not inside the deleted
+element. Walking on tombstoned content the editor kept: after a split at
+offset 0 and a delete of the empty left piece, the concurrent same-boundary
+product holding the moved text sits right after the editor's own product
+(yorkie-js-sdk#1408), and a concurrent Enter at the start of a known
+sibling the editor did not delete put its moved text past that sibling.
+
+"Saw it gone" reads the sibling's `removedAt`, which keeps only the newest
+tombstone. A split product inherits its source's `removedAt`, so a product
+born tombstoned on this replica (split off an element already deleted here)
+still counts as alive for an editor that did not know that delete.
+
+Two paths outside the walk change what `removedAt` holds, and only one of
+them changes the walk. GC's `Purge` drops the node from `NodeMapByID` and
+relinks the chain around it, so the walk never reads a purged tombstone:
+`findFloorNode` compares `createdAt` exactly and resolves a purged ID to
+nil, and the predecessor already points past it to the same successor the
+walk would have reached by passing the tombstone. The decision is therefore
+the same before and after a purge — a node is purged only once the minimum
+synced version vector covers its `removedAt` (`Root.collect`), so every
+change applied after that knew the delete and read "saw it gone" as true.
+Undo is the path that does change the walk: `Restore` clears the tombstone
+in place, so on a replica holding the undo the walk stops at a sibling it
+would otherwise have passed. See the limitation below.
+
+The cascade still runs only when this edit wins the element's LWW
+(`canDelete`). Cascading on a lost LWW too would make every #1408 shape
+converge, but it tombstones text nobody deleted: a delete that is undone,
+or a merge that turned into a delete, reaches a concurrent split product
+whose content the editor never saw (`tree_split_cascade_regression_test.go`).
+The cost is that some deletes stop short. Mostly this leaves one extra
+empty element on one replica, with text agreeing: in the #1408 shape the
+replica whose own delete won the LWW keeps its own split product, emptied
+because the moved text went to the other side's product, while on the
+other replica that product was born tombstoned. With a third replica in
+the race, a delete that lost the LWW can also leave deleted text on one
+replica; random races hit this rarely.
+
+Known limitations:
+
+- The residue is state divergence, not only a cosmetic extra element: the
+  product is alive on one replica and tombstoned on the other, so the trees
+  differ in shape as well as XML. `main` converged these shapes by deleting
+  the text too. `TestTreeSplitSiblingCascadeResidueConverges` is the skipped
+  reproducer asserting the convergence this rule does not reach; closing it
+  needs the multi-tombstone record described below.
+- `removedAt` keeps only the newest tombstone. When a concurrent delete of
+  a sibling the editor merged back has a newer ticket than the merge, its
+  tombstone is the one kept, the walk stops there as for a sibling the
+  editor did not see removed, and a product split off that sibling
+  concurrently survives on that replica only. Enter, Undo (which merges
+  the split product back) and a delete of both spans, against a concurrent
+  Enter at the same place, is one such case; `main` converges there.
+- A sibling merged back by a change the editor did not know ends the walk.
+  A product split off it concurrently survives on the splitter's own
+  replica in every delivery order, while elsewhere it can be born
+  tombstoned (split off a merged element). Over the six delivery orders of
+  such a three-replica race `main` diverges in three and this rule in all
+  six; joining paragraphs instead of spans behaves the same.
+- "Saw it gone" reads the node's current tombstone, not the editor's own
+  view of it, so a delete concurrent with an undo of a sibling's removal
+  cascades differently on a replica that already holds the undo
+  (`TreeNode.unremove` cleared `removedAt`, the walk stops) than on one
+  that does not (the walk passes), and the difference outlives both changes
+  being applied. Reaching it needs the delete to be concurrent with the
+  undo and to know the delete the undo reverses. Pinning the test to the
+  editor's causal view instead needs the tombstone record to keep every
+  delete rather than the newest, which changes the data model, the snapshot
+  encoding and the JS port along with this rule.
+- The same single slot is why the cascade cannot both converge the #1408
+  residue and keep text: with only the newest tombstone to read, the rule
+  has no way to tell a sibling the editor merged back from one a concurrent
+  delete took, and the two want opposite answers.
+
+**The trade was taken by the maintainers.** It is the one place in this
+document where a change knowingly converges fewer delivery orders than the
+version before it, and convergence is the stated Goal. The shapes it stops
+converging are the three limitations above; the shapes it starts converging
+in text are the #1408 family, which `main` converged by tombstoning text
+nobody deleted. The maintainers took the text over the residue (yorkie#2143).
+Closing the residue without paying either cost is tracked in yorkie#2155;
+until then the skipped `TestTreeSplitSiblingCascadeResidueConverges` and
+`TestTreeSplitProductBornTombstonedConverges` stand as the open half.
+
+**Cross-implementation.** §4.1's stop rule changes *which nodes* a
+`Tree.Edit` tombstones, and only the Go implementation has it; the JS port
+is yorkie-js-sdk#1456. Until it lands, a JS client and the server disagree
+on the cascade for exactly the shapes above: the server's snapshot
+(`server/packs/snapshot.go` rebuilds through this code) then holds a split
+product a JS client applying the same changes locally has tombstoned, and
+the disagreement survives until that client reloads from a snapshot. Unlike
+the §9.6 precedent, this is not a strict narrowing of an already-divergent
+set — the limitations above are shapes `main` and the JS SDK converge — so
+the two halves want to land close together.
+
+### §4.2 Moved Children Guard
+
+Exclude children whose parent is in `toBeMergedNodes` from the
+parent-cascade delete. These children are being moved by the merge
+operation, not deleted. Without this guard, merge-target children
+would be incorrectly tombstoned.
+
+### §4.3 Skip Concurrent Element Merge
+
+When a delete range crosses into an element whose `CreatedAt` is not
+in the editor's version vector, skip merge detection for that element.
+The boundary crossing is an artifact of a concurrent split — the
+editor's original range did not include this element, so detecting it
+as a merge target would be incorrect.
+
+## Phase 5: Delete
+
+Tombstone the nodes collected in Phase 4. No concurrent merge/split-
+specific logic in this phase — it applies the deletion marks produced
+by `collectBetween`.
+
+## Phase 6: Merge
+
+**Functions**: `mergeNodes`, `propagateMergeDeletes`
+
+### §6.1 Child Migration and Forwarding Pointers
+
+During merge, children are moved from the merge-source to the
+merge-target (`fromParent`). Each moved child receives:
+
+- **`MergedFrom`** (persisted): the source parent's ID. Used to
+  identify which children were moved by this merge.
+- **`MergedAt`** (persisted): the immutable merge ticket. Needed
+  because `source.removedAt` can be overwritten by LWW, but the
+  merge timestamp must be stable for version-vector checks.
+- **`mergedInto`** (runtime cache): set on the source node, pointing
+  to the target. Rebuilt from `MergedFrom` on snapshot load.
+
+Both live and **tombstoned** children are moved, in child order
+(`collectBetween` collects them with `Children(true)`). Moving the
+tombstones preserves the source's full RGA sequence in the target, so
+a concurrent insert anchored on a removed sibling (e.g. `c` in a
+`cd → c,d` split whose `c` was deleted) resolves in the target through
+the normal path and is ordered against the other concurrent inserts by
+the RGA `CreatedAt` tie-break (`FindTreeNodesWithSplitText` step 04).
+This is what makes the merging replica converge with a replica that
+applied the insert *before* the merge, including when several clients
+insert at the same anchor.
+
+The relocation uses `index.Node.MoveChild`, which keeps both length
+dimensions correct on **both** parents. A tombstone occupies no visible
+index positions — `remove()` already debited its `VisibleLength` from
+its ancestors — so for a removed node `MoveChild` relocates only the
+include-removed `TotalLength` and leaves `VisibleLength` untouched on
+source and target alike. (Reusing the alive-node `DetachChild`/`Append`
+pair would double-count the tombstone's visible length on the target and
+under-count it on the source.)
+
+### §6.2 Delete Propagation to Merge-Moved Children
+
+When a merge-source is deleted (not merged), its former children —
+now in the merge target — must also be tombstoned. Children are
+identified via `child.MergedFrom == source.id`.
+
+Skip propagation when `mergedInto` is this edit's own merge destination
+**and** one of the edit's own positions named that source: the concurrent
+merge then moved the children exactly where this edit would have, and
+tombstoning them would undo a merge the edit itself asks for. Two replicas
+running the same unwrap are the symmetric case (the source is the declared
+to-parent); an edit whose range starts inside the merged-away source is the
+other (the source is the declared from-parent).
+
+"Named" means the whole declared ancestry, not just the declared parent
+(`Tree.declaredBoundaries`). An edit that merges at more than one level runs
+past the Start or End token of every element between its position and the
+common ancestor, and stops at each of them rather than covering it; keying
+the skip on the innermost one alone would tombstone the merge-moved children
+of every enclosing boundary. The walk upward prefers a node's `MergedFrom`
+over its physical parent, because a prior merge has already moved the node
+out from under the element the position was declared inside.
+
+The positions have to be read as *declared*, not through the resolved
+`fromParent`/`toParent`: §1.1 redirects a position away from a merged-away
+parent, and that redirect is what widens the resolved range over the source
+in the first place. Nothing in the resolved range separates the two cases —
+a source the range merely spans is fully contained exactly as a redirected
+boundary is.
+
+Each declared `ParentID` is resolved through `findMergeNode`, not the floor
+lookup `Tree.ToTreeNodes` uses. A floor lookup matches on `CreatedAt` alone,
+so a `ParentID` naming an element-split product this replica does not hold —
+a concurrent split not yet applied, or a client-supplied offset — resolves to
+the offset-0 element and hands the skip to a node the position never named.
+An exact element match treats the absent product as the absent lineage it is,
+the same guard §6.3 applies to `mergedInto`.
+
+What the propagation tombstones never enters Phase 5's `toBeRemoveds`, so it
+reaches the operations layer as GC pairs only — not through
+`TreeEditReverseInfo` — and an undo of the edit does not restore it. That is
+JS's behavior too (its merge propagation likewise never appends to
+`nodesToBeRemoved`), and `undo-redo-go-port.md` keeps the two ports identical
+including JS's known defects, so this is a shared defect to fix in both ports
+at once rather than in Go alone.
+
+A source the range only spans is a plain delete of everything that was
+inside it. Its children are tombstoned wherever the concurrent merge left
+them; otherwise the replica that merged first keeps them alive while the
+replica that deleted first does not (#1956: an `Edit(0, 1)` unwrap of `p1`
+against a concurrent `Edit(0, 5)` that deletes `p1` whole).
+
+### §6.3 Chained-Merge Flattening
+
+A merge chain P→Q→R arises when the intermediate target Q of one merge
+(P→Q) is itself merged away by another (Q→R). A left-most insert anchored
+at P must still resolve in the final live target R, on every replica and
+after a snapshot reload.
+
+The snapshot model can only ever represent a **compressed** chain. The
+proto persists one `MergedFrom` pointer per moved child; `rebuildMergeState`
+sets `source.mergedInto` to the *current physical parent* of that source's
+children. After P→Q→R the children physically live in R, so any faithful
+rebuild yields `P.mergedInto = R` — never the intermediate Q. There is no
+way to reconstruct Q from the snapshot without a proto change (a non-goal).
+
+So the runtime is made to match the compressed form instead of building a
+multi-hop chain that a reload could not reproduce. `mergeNodes` keeps the
+chain flat with two mechanisms:
+
+1. **Destination resolution** (`resolveMergeTarget`): the merge destination
+   follows the `mergedInto` chain from `fromParent` while it is a merged-away
+   tombstone, to the final live target. When Q→R was applied before P→Q on a
+   replica, P's children forward to R instead of piling up under the removed
+   Q.
+2. **Original-source preservation**: `MergedFrom` is stamped only on a
+   child's first move, so a child carried through the chain keeps its
+   original source P. Every source's `mergedInto` is then (re)pointed at the
+   resolved destination — direct sources from `toBeMergedNodes`, transitive
+   sources recovered from the moved children's preserved `MergedFrom` (path
+   compression). Both derive `mergedInto == child's new parent`, the exact
+   rule `rebuildMergeState` uses, so runtime and snapshot agree.
+
+With the chain flat, `FindTreeNodesWithSplitText`'s §1.1 redirect stays a
+single hop: `P.mergedInto` already points at the live R, and its boundary
+lookup (first child with `MergedFrom == P`) still resolves because P's
+children retained their original `MergedFrom`. No redirect change is needed.
+
+## Phase 7: Split
+
+Three levels: `SplitElement` (child partitioning), `Split`
+(node-level linking), and the recursive split loop (ancestor
+traversal).
+
+### §7.1 SplitElement: Merge-Moved Children
+
+During child partitioning into left/right, children that were moved
+by a concurrent merge must stay in the original (left) node. A child
+is kept in the left partition when:
+
+1. Its `MergedFrom` identifies a source that was a child of the
+   split node, AND
+2. The editor's version vector does not cover the child's `MergedAt`.
+
+`MergedAt` (not `source.removedAt`) is used for the VV check because
+`removedAt` can be overwritten by LWW.
+
+### §7.2 SplitElement: Attribute Copy
+
+Deep-copy the original node's attributes (`Attrs`) to the split
+(right) node. Without this, the right node is created with nil
+attributes, losing any styling applied before the split.
+
+### §7.3 SplitElement: Boundary Insert Migration
+
+After partitioning children into left/right, any consecutive run of
+concurrent inserts (children whose `CreatedAt` is unknown to the
+splitter's version vector) at the start of the right partition is
+moved to the left partition.
+
+A concurrent insert placed between the split boundary and the next
+original child was positioned relative to the pre-split child order.
+Its CRDT position (after a left-partition child) means it belongs in
+the left partition.
+
+Element split siblings (nodes with `InsPrevID`, non-text) are skipped
+during the boundary scan — without this, a split sibling at the start
+of the right partition would prematurely stop the scan. Text split
+siblings retain their boundary role because their deterministic IDs
+make them safe markers.
+
+### §7.4 Split: Empty Sibling Re-Parenting
+
+After creating a split sibling and linking it into the `InsNextID`
+chain, check whether the existing `InsNext` sibling is in a different
+parent (due to a prior parent-level split by another operation). If
+so, and the new split sibling has no children (empty), move it before
+`InsNext` in `InsNext`'s parent with `index.Node.MoveChildBefore`.
+
+That move has to be tombstone-aware for the same reason §6.1's is: the
+split product inherits `removedAt` from the node it was split off, and
+a product born tombstoned contributes no `VisibleLength` to either
+parent. The `DetachChild`/`InsertBefore` pair used here before took two
+tokens off the source it never held and gave the destination two it
+must not have (yorkie#1999).
+
+This fixes divergences where concurrent `splitLevel >= 2` operations
+produce empty replay split siblings that land in different parents
+depending on application order. The empty-children guard prevents
+false activation on splits at different positions, where the new
+sibling legitimately carries children.
+
+VV-independent (purely structural), preserving clone/root consistency.
+
+### §7.5 Recursive Split Loop: Per-Iteration Advance
+
+The recursive `split` function executes
+`advancePastUnknownSplitSiblings` at each iteration, not just before
+loop entry. Element splits produce non-deterministic IDs, so the
+`InsNextID` chain is the only discovery path for concurrent element
+split siblings at each ancestor level.
+
+The parent equality check is relaxed (`relaxParentCheck`) at ancestor
+iterations. A concurrent ancestor split may move siblings to different
+parents, causing the strict check to break the chain prematurely.
+
+If the advance moves `left` to a node under a different parent,
+`parent` is updated to match so `FindOffset` and `Split` operate on
+the correct subtree.
+
+The advance stops in front of a run of **empty** unknown split siblings
+that ends at the current actor's own product. Those are same-boundary
+products that §7.8 ordered ahead of ours, not content the editor meant
+to keep on its left; a replica that applied them later re-parented them
+after the boundary (§7.4, which keys on the same emptiness).
+
+### §7.6 Recursive Split Loop: Removed-Inclusive Offset
+
+`FindOffset` in the split loop passes `includeRemoved: true` to match
+`SplitElement`'s `Children(true)` partition. Without this, tombstoned
+children before the split point cause the visible-only offset to be
+smaller than the all-children offset, misplacing the partition
+boundary.
+
+### §7.7 Recursive Split Loop: skipActorID
+
+`advancePastUnknownSplitSiblings` accepts a `skipActorID` option that
+stops advancement at siblings created by the current change's actor.
+
+In the split loop, `issueTimeTicket` creates siblings with lamport
+timestamps beyond the change's version vector, making them appear
+"unknown". Without `skipActorID`, the function advances past the
+current operation's own split products, diverging from the clone path
+(`VV=nil`) where no advancement occurs.
+
+Since a single actor's changes are always sequential, an "unknown"
+sibling from the same actor is always our own creation, not a
+concurrent one. This preserves clone/root consistency while still
+advancing past genuine concurrent siblings from other actors.
+
+### §7.8 Split: Same-Boundary Ordering
+
+`SplitElement` places its product directly after the node it splits.
+When a concurrent split of the same node at the same boundary has
+already been applied, the second product lands in front of the first,
+so the products sit in **arrival order** and replicas disagree:
+
+```
+<doc><p><span>abcde</span></p></doc>, both replicas split [0,1]
+XML, both:  <doc><p>...</p><p></p><p></p></doc>
+children:   d1 = [p, split(d2), split(d1)]
+            d2 = [p, split(d1), split(d2)]
+```
+
+XML and `toSortedJSON` still match, since all but the last product are
+empty, so no convergence check that compares them sees it. The first
+position-based operation that lands on the difference does: a range
+delete over the whole root then leaves an empty node on one replica for
+good, and an empty node between two halves of a split span carries
+different attributes on each replica, because it is a different node.
+The server builds snapshots the same way, in its own arrival order, so a
+replica that receives one takes a third view.
+
+`orderSameBoundarySplit` orders the products by ticket instead, newest
+first, as RGA orders concurrent inserts after the same node. A split
+that lands at the end of its node -- the right half has already left
+through a concurrent split of the same boundary -- follows the
+`InsNextID` chain over unknown element split siblings of another actor
+with a newer ticket, and splits the last of them at offset 0. The right
+half lives in that sibling on this replica, so it moves into the new
+product exactly as it would have moved out of the original on a replica
+that applied this split first. A split that is not at the end of its
+node, or whose next sibling is older, is placed as before.
+
+The parent check is relaxed for the same reason as §7.5: at a
+multi-level split the sibling may already sit under the next level's
+product. Relaxed, not dropped — the sibling must still sit under the
+node's own parent or under a split product of it, because `InsNextID`
+also arrives verbatim from client-supplied bytes and an arbitrary link
+would otherwise redirect the split onto an unrelated element. A
+tombstoned sibling is not followed either: splitting it would make the
+product born tombstoned here but live on a replica that applied this
+split first. VV-dependent, like §7.5; without a version vector nothing
+is unknown and the split is placed as before.
+
+Every `InsNextID` walk runs through `insNextWalker`, which refuses to
+visit a node twice — the §7.5 advance and the §7.8 retarget, `Edit`'s
+Phase 3 range narrowing, `collectBetween`'s cascade delete, and the
+`Style`/`RemoveStyle` propagation loops. The field is a trusted
+structural pointer that only `SplitElement` writes, but the wire format
+carries it regardless, so a chain that loops back on itself would
+otherwise spin the applying goroutine forever while it holds the
+document lock, and `collectBetween`'s cascade would grow its removal
+list with it.
+
+The converter drops the field from everything a client sends for the
+same reason: content is always freshly created by the editing client
+and can never be a split product. That is both decode paths —
+`FromTreeNodesWhenEdit` for `TreeEdit` operation content, and
+`fromElement` for the element bytes a `Set`/`Add`/`SetByIndex` carries,
+which otherwise reaches the tree through the same
+`BytesToObject`/`BytesToTree` a snapshot uses. A snapshot is server-built
+and keeps its links.
+
+`MergedFrom`/`MergedAt` ride the same wire but are dropped on **one** of
+those two paths only, by `DropEngineOnlyLinks`. On `TreeEdit` operation
+content they are engine-only in the same sense: `Tree.Edit` stamps them
+on the content it inserts, from the merge parent it resolves locally on
+every replica, so a value a client sends can only disagree with what the
+applying replica computes — and would steer the §1.1 redirect and §6.2
+propagation at a parent of the client's choosing. The derived
+`mergedInto` goes with them there, since `NewTree` rebuilds it from
+`MergedFrom` while decoding.
+
+An element payload is different, and keeps its merge lineage. It is not
+always freshly created content: the reverse of a `Remove` carries a
+`DeepCopy` of the element as it stood, merges and all, so its
+`MergedFrom`/`MergedAt` are the genuine record of merges that happened
+before the removal. Dropping them would switch off the §1.1 redirect and
+the §6.2 propagation skip for a tree restored by an undo — a silent loss
+of merge state, not a hardening. `DropSplitLinksInElement` therefore
+clears `InsPrevID`/`InsNextID` and nothing else, on both ways in: the
+converter's `fromElement`, and `executeUndoRedo` for the copy a reverse
+operation captured locally, which never passes the converter on the
+replica that runs the undo.
+
+Keeping the lineage makes both ends of a merge relation partly
+client-supplied, so every reader of one resolves it through
+`Tree.findMergeNode` rather than through `findFloorNode`: the node has to
+be the one the ID names *exactly* (both ends are recorded by `mergeNodes`
+as a node's own ID; a floor match is a position interior to a split node,
+which no merge records) and has to be an element (a merge moves children
+out of one element parent into another, and a text node holds none).
+That covers `rebuildMergeState` on the way in, `mergeNodes` re-deriving
+`mergedInto` when a later merge moves the node again, and the three
+`mergedInto` readers — `resolveMergeTarget`,
+`FindTreeNodesWithSplitText`'s §1.1 redirect, and `propagateMergeDeletes`
+§6.2. The last is why the check cannot live at the decode alone: the
+field stays on the node inside the live document, and a made-up offset
+that resolved by floor would plant a forwarding pointer on an unrelated
+live node for a later, innocent delete to cascade-tombstone through.
+
+The split loop ascends from `parent`, not from the retargeted node. A
+retarget reorders the product *within* one level; the node the
+operation split is still `parent`, and the next level's boundary is
+"after `parent`" in `parent`'s own branch. The §7.5 advance then stops
+in front of the same-boundary empty run and `orderSameBoundarySplit`
+re-applies the same ticket ordering at that level, so each level orders
+itself against its own chain.
+
+## Phase 8: Insert
+
+Insert content at the editor's intended position with parent-deletion
+guard and merge redirect. No concurrent merge/split-specific logic in
+this phase — the preceding phases ensure the insertion point is correct.
+
+## Phase 9: Style Operations
+
+**Functions**: `Style`, `RemoveStyle`
+
+Style operations use the same split sibling advance as Edit (Phase 2)
+but require two additional mechanisms for concurrent split handling.
+
+### §9.1 End-Token Split Sibling Guard
+
+When processing an End token, skip styling if the node has an
+`InsNextID` split sibling not in the editor's version vector **and**
+the styling change's range ended inside the node. Only then is the End
+token in the range solely because a concurrent split extended the
+traversal past the original element boundary.
+
+Helpers: `hasUnknownSplitSibling(node, vv)` — follows `InsNextID`,
+checks the sibling is an element whose `CreatedAt` is not covered
+by VV; omits the parent-equality check (same rationale as §7.5).
+`endsInside(node, declaredToParent)` — walks up from the element the
+range-end position named as its parent and asks whether it reaches
+`node`. The ancestry it walks is the *current* one, and a split moves
+every child after the split point into the new right half, so each
+ancestor is matched through its split lineage (`isSplitProductOf`,
+backward along `InsPrevID`) rather than by identity: any product of
+splitting `node` stands for `node`, which is what that ancestry looked
+like when the change declared the position. Matching by identity alone
+made the guard fail *open* whenever the range-end position named a
+descendant the split had moved — the one direction a guard must not
+fail in, since a wrongly-styled live node cannot be retracted.
+
+**Why the second condition** (Fix 25): the first one alone cannot tell
+the two histories apart. "This End token is in the range only because
+of the split" and "this End token was in the range anyway" look
+identical in the index space, and the guard assumed the first. A style
+whose range genuinely ran past the paragraph's end — `Style(5, 8)`
+over `<r><p>ab</p><p>cd</p><p>ef</p></r>` — then lost the style
+entirely on any replica that applied a concurrent split of that
+paragraph first, while the opposite order kept it on both halves. The
+range-end position is carried by the change and never moves, so it
+settles the question the index space cannot: if the change's range
+ended inside the node, its End token was never in that range.
+
+**Why End-token guard over range clamping**: Clamping works for
+text-level ranges but fails for element-level ranges where the
+editor selected children that moved to the split sibling. The guard
+handles both uniformly:
+
+- **Text-level** (range within element content): P's End token
+  skipped → P' Start rejected by `canStyle` → no elements styled.
+  Matches the unsplit behavior (no element tokens in range).
+- **Element-level** (range across children): parent End token
+  skipped → child Start token still styled via `canStyle`. Matches
+  the unsplit behavior (child was in the original range).
+
+### §9.2 Style Propagation Over Split Lineage
+
+After styling a node, follow the `InsNextID` chain and apply the same
+style/remove-style to unknown split siblings (those whose `CreatedAt`
+is not covered by the editor's VV).
+
+This ensures that a style operation whose range was determined before
+a concurrent split also covers the right part. Without this
+propagation, the client that splits first misses the style on the
+right node, while the client that styles first copies it via the
+attribute deep-copy in §7.2 — causing divergence.
+
+Helpers: `unknownSplitSiblings(node, vv)` forward along `InsNextID`,
+`splitFamilyOf(node, vv)` backward along `InsPrevID`.
+
+**Which token reaches the node does not decide this** (Fix 25). The
+propagation used to run only from a Start token, which drops the case
+§9.1 exists for: a range that begins inside the paragraph and runs
+past its end reaches the paragraph through its End token alone, and
+the right half then stayed unstyled. It now runs from whichever token
+reaches the node first — once per node, tracked by the caller, which
+also matches the pre-existing `RHT` behaviour of rejecting a second
+write at the same ticket.
+
+The mirror case needs the chain walked the other way. When the split
+point falls before the range start, the traversal reaches only the
+*right* half, whose creation `canStyle` rejects; the left half — the
+node the change actually styled — is outside the resolved range. On an
+End token the range genuinely ran past (§9.1), `splitFamilyOf` walks
+`InsPrevID` back to the first node whose creation the change knew and
+styles the whole family from there. A chain that reaches no such node
+is a node simply new to the change, and is left alone.
+
+The family enters through that one known node, so it is that node the
+§9.1 guard judges: when the guard excludes it, the split is the only
+reason this End token is in the range at all, and the family is
+dropped whole. Without that check the two halves of the fix
+contradict each other — the guard skips the left half on its own End
+token and `splitFamilyOf` immediately re-adds it from the right.
+
+**The family is reached through an End token only if the change began
+at or inside it** (Fix 27). The branch reads the End token as "the
+range ran past this element's end", which also requires the range to
+have started no later than that element. A split of more than one
+level breaks that reading: it carries the right half into a *new*
+parent, and §2's advance stops at a parent change, so a range that
+began right after the known node now passes the right half's End token
+without ever having entered the element. The family is therefore added
+only when the change's range-start position was declared inside the
+known node — matched in both directions along the split lineage as
+§9.6 does — **or** at or before it in document order, with removed
+nodes included so a concurrent removal between the two moves neither.
+
+The second half of that test is what keeps the rule from being
+narrower than the branch. A range that began strictly *before* the
+known node never named it as its parent, so the begins-inside test is
+false for it exactly as it is for a range that began after it, and
+only the latter never covered the element. The traversal usually
+reaches such a node on its own Start token and the branch never runs;
+when a concurrent removal or §9.4's from-side recovery moves the
+resolved start past it, this branch is the only thing left that styles
+the family, and document order is what distinguishes the two:
+
+```
+<r><p><p><p>abcd</p><p>efgh</p></p><p>ijkl</p></p></r>
+A: Edit(10, 10, nil, 1); Edit(7, 9)  // <p>e|fgh</p>, then merge e left
+B: Style(0, 14, {b: x})              // both paragraphs whole
+
+B,A  <p b="x">abcde</p><p b="x">fgh</p>
+A,B  begins-inside alone: <p>fgh</p> unstyled
+```
+
+None of the scans in the table below produces that shape. A scan of
+one change that splits (levels 1 and 2) and deletes one or two
+positions, in either order, against every style range (899,668 pairs;
+not in the suite, 40 s) shows the document-order half closing 4,265
+diverging pairs and opening none; the JS port reproduces the same
+4,265.
+
+A from-position whose parent or left sibling is unknown answers no, and
+so does the document-order half when a concurrent merge has moved the
+left sibling out of the declared parent. Answering yes there closes 368
+more pairs of that scan but opens 5 that converge now, so it is not
+taken. Answering no for the begins-inside half as well opens 43,448 and
+breaks the split scans: a concurrent split moves that sibling too.
+
+```
+<r><p><p><p>abcd</p><p>efgh</p></p><p>ijkl</p></p></r>
+A: Edit(5, 5, nil, 2)      // <p>ab|cd</p>, two levels
+B: Style(8, 14, {bold: aa}) // <p>efgh</p> only
+
+B,A  <r><p><p><p>ab</p></p><p><p>cd</p><p bold="aa">efgh</p></p>...</r>
+A,B  without Fix 27: <p bold="aa">ab</p> and <p bold="aa">cd</p> as well
+```
+
+This is the complex suite's `concurrently-split-edit-test`, `A -> B`,
+split-2 against style and remove-style. It converged before Fix 25 and
+diverged after it; the flat scans below split one level of a flat tree
+and cannot produce the shape, and the complex suite reports a
+diverging pair with `t.Skip`, so nothing failed. The JS SDK found it
+porting Fix 25 (yorkie-js-sdk#1404), and both implementations carry
+the same check.
+
+`splitFamilyOf` collects backwards and reverses once rather than
+prepending per link: the chain length is chosen by whoever authored
+the splits, and prepending copies the slice each time. The caller also
+skips a node it has already resolved, so a chain of *k* products costs
+one walk, not one per member.
+
+### §9.3 Range Boundary at Merged-Away Anchors
+
+A style position anchored at the left-most position inside a parent
+that a concurrent merge removed must not resolve to the insertion
+boundary of §1.1. The insertion boundary sits before the first child
+moved by the merge, so nodes concurrently inserted between the
+merge-source tombstone and the moved children fall inside the styled
+range on the applying replica — while the styling replica saw them
+outside its range, after the then-live parent. Replicas then diverge
+on attributes.
+
+`FindTreeNodesWithSplitText` takes a boundary mode: `BoundaryInsert`
+(default, §1.1 behavior for edits) and `BoundaryRange`, used by
+`Style`/`RemoveStyle`, which resolves the position to right after the
+merge-source tombstone. In visible coordinates this lands before both
+the concurrent inserts and the moved children, so a range end excludes
+them and a range start includes them — matching the styling replica in
+both directions. Ranges that genuinely cover the merged content
+(anchored outside the merged parent) are unaffected.
+
+A range end anchored after a moved child (a non-left-most position in
+the merged parent) does not go through the §1.1 redirect; §9.4 covers
+it with a per-node filter.
+
+### §9.4 Per-Node Filter at Moved Anchors
+
+A range end anchored after a moved child resolves through the moved
+child directly into the merge target. Nodes that sit between the
+merge-source tombstone and the moved children — concurrent inserts
+anchored at the tombstone — then fall inside the traversal, although
+the styling client saw them outside its range, after the then-live
+parent. The version-vector check in `canStyle` does not help: the
+interloper may be the styling client's own insert, causally known but
+positionally excluded.
+
+Two mechanisms close this:
+
+1. **Intended-parent stamp.** An insert whose position was declared
+   inside a merged-away parent physically lands in the merge target.
+   `intendedMergeParent` stamps such content with
+   `MergedFrom = declared parent` (merge ticket taken from a moved
+   sibling), making it indistinguishable from merge-moved children —
+   which is what it logically is. This also aligns merge-delete
+   propagation: when the declared parent is later fully deleted, the
+   insert dies with it, matching the replica that applied the insert
+   into the live parent and cascaded the delete.
+2. **Interloper filter.** `mergedAnchorInterloperGuard` activates when
+   the range-end position's declared parent is a merged-away tombstone
+   sitting directly under the merge target and the merge is unknown to
+   the styling client's version vector. During the style traversal it
+   skips element nodes under the target, positioned after the
+   tombstone, that carry **no merge stamp at all** — only such nodes
+   (concurrent inserts anchored at the tombstone) are positively
+   identifiable as interlopers. Any node with a `MergedFrom` fails
+   open: a child that reached the declared parent via an earlier merge
+   keeps the *original* source in `MergedFrom` (first-move stamp rule,
+   Fix 20), and path compression on `mergedInto` makes "was it inside
+   the declared parent" unrecoverable afterwards, so stamped nodes
+   fall back to pre-§9.4 behavior rather than risk skipping a node the
+   styler legitimately covered. Each traversed node is judged by its
+   highest ancestor directly under the target, so an interloper's
+   descendants are skipped with it. Moved children and stamped inserts
+   pass the filter; nodes before the tombstone are untouched.
+
+`SplitElement` copies `MergedFrom`/`MergedAt` to the split product
+(as `SplitText` always has), so a split half of a merge-moved element
+carries the same provenance under either merge-then-split or
+split-then-merge application order and is judged identically by the
+filter.
+
+**From-side recovery (Fix 23).** A range *start* anchored after a moved
+child is the mirror image: the merge moves the anchor child behind the
+interlopers, so on the applying replica the resolved range collapses
+(start past end) and the traversal misses nodes the styling client
+covered — the writer keeps a one-sided attribute entry. A skip filter
+cannot compensate (the traversal covers nothing), so
+`reversedFromAnchorRecovery` re-anchors the traversal start just after
+the last live sibling before the merge-source tombstone, but only when
+the same §9.4 shape holds for the *from* position **and** the resolved
+range actually collapsed; an ordered range that moved with the merge is
+left untouched. The recovered traversal styles only nodes the interloper
+predicate positively identifies (stamp-free children between the
+tombstone and the moved children); version-vector checks keep inserts
+unknown to the styler unstyled. For `RemoveStyle` this materializes the
+removal tombstone on both replicas — it must be recorded even for a
+missing key, because it arbitrates a concurrent `SetAttr` with an
+earlier ticket.
+
+### §9.5 Reached Set from the Change's Own Positions
+
+§9.1–§9.4 all reconstruct, after the fact and from index positions,
+which nodes the styling replica would have reached. Some of that is not
+recoverable from indices at all, and each predicate closed one family
+of histories while leaving another. Fix 25 moves the part that *is*
+recoverable off the index space entirely.
+
+A token traversal reaches an element through a single token exactly
+when the element is a boundary of the range: the ancestors of the
+range-start position, whose End tokens the range ran past, and the
+ancestors of the range-end position, whose Start tokens it ran past —
+each chain stopping below the common ancestor of the two. Elements
+strictly between the two positions are reached through both tokens.
+
+Both positions are carried by the change and never move, so
+`boundaryElements(from, to)` computes that set identically on every
+replica, whatever a concurrent merge did to the index space. Without a
+concurrent merge the traversal has already found every one of them and
+they add nothing; with one they are the nodes the resolved range can no
+longer see. A merge that empties one paragraph into another pulls the
+range-end anchor back inside the range-start paragraph, and the
+resolved range then stops short of the End token it ran past before —
+permanently, and on that replica only.
+
+These elements are writes, so they answer to the same questions the
+traversal's tokens do, and each is carried with the token the range
+ran past (End for the range-start chain, Start for the range-end
+chain) so it can be asked. The skip predicate splits in two for this:
+`skipReached` is about the *change* — the §9.1 End-token guard and the
+§9.4 merged-anchor interloper filter — and holds for every node a
+style writes to, however it was found; `skipToken` adds the one
+restriction that belongs to the index traversal alone, the §9.4
+from-side recovery's rule that a re-anchored traversal may touch only
+the interlopers it positively identified. Boundary elements come from
+the change's own positions, are not in that widened span, and answer
+to `skipReached` only. Putting them through the whole of `skipToken`
+costs 150 pairs on the merge scan for no gain in safety.
+
+Two ranges get no boundary elements at all
+(`boundaryRangeCovers`). A range whose two positions are equal covers
+nothing on any replica. A range that resolves *backwards* covers
+nothing here either, and `traverseInPosRange` already returns early on
+it — but a merge is exactly what makes a forward range resolve
+backwards, and repairing that is what these elements are for. The
+distinguishing question is *why*: only a removal can collapse a range,
+so an inversion whose declared ancestry is live on both ends was
+declared backwards by the caller and gets nothing, while one with a
+removed ancestor is the merge case and is repaired. Gating on the
+resolved order alone instead costs 108 pairs on the merge scan.
+`StyleByPath`/`RemoveStyleByPath` now reject a backwards range up
+front, the way `Style`/`RemoveStyle` always have.
+
+`styleTargets` puts the whole resolution in one place: it runs
+Phase 1–2 position resolution, the §9.3/§9.4 machinery, the traversal,
+the §9.2 lineage closure and this boundary set, and hands `Style` and
+`RemoveStyle` one ordered, duplicate-free node list. The two operations
+are one range resolution asked to write two different things, and the
+reached set is now shared code rather than two copies kept identical by
+hand.
+
+`reversedFromAnchorRecovery` (§9.4) also treats a range that resolves
+*empty* as collapsed, not just one that resolves backwards: a merge can
+leave the start anchor exactly on the end one, and covering nothing
+loses the client's range as completely as covering it backwards. A
+change whose own range was empty is excluded, so an empty style stays
+empty.
+
+**What this does not close.** Attributes on *tombstones*. Elements the
+change covered strictly between its two anchors are still resolved in
+the current index space, and a merge can move a removed one out of
+reach, so the two orders book a different amount of attribute metadata
+onto removed nodes while rendering the same document. Recovering those
+needs the range resolved in an index space filtered by the change's
+version vector — nodes the change could not have known contributing
+zero width, nodes it knew contributing their width regardless of later
+structural edits — which has to land on the server and the JS SDK
+together.
+
+### §9.6 Range-Start Guard at Merged Anchors
+
+§9.1 asks of an End token in the range "was the range-end position
+declared inside this element, or did a concurrent split push the anchor
+here". §9.6 is the same question on the other side, and it is what
+closed the merge family.
+
+A token traversal reaches an element through its End token *alone*
+exactly when the range begins inside it: the resolved from-parent and
+its ancestors, and nothing else — every other element reached on an End
+token was reached on its Start token first. So the applying replica's
+answer to "which elements does my range begin inside" is that chain,
+and the change's own answer is the ancestry of the element its
+range-start position named as its parent. `beginsInside` compares them.
+
+When a merge removes a paragraph's opening tag, its children move into
+the element before it, and a range-start anchored among those children
+resolves inside that element — whose End token is then in the range
+purely because of the merge. Styling it writes an attribute on a **live**
+node that the replica applying the style first never touched, which is
+the failure with no way back. `Style(6, 8)` over
+`<r><p>ab</p><p>cd</p><p>ef</p></r>` against a concurrent
+`Edit(1, 5)` is the minimal case: the style covered only the second
+paragraph, which the merge turns into a tombstone, so nothing should
+render as styled — and before this guard the merge-first order rendered
+`<p b="x">cd</p>`. This shape is 126 of the 297 rendered divergences the
+merge scan started from, and all 126 of what was left after §9.1–§9.5.
+
+`beginsInside` matches a declared ancestor to the node in **both**
+directions along the split lineage, which `endsInside` deliberately does
+not: a split of the element the range began inside leaves the start
+anchor in whichever half now holds it, so the resolved from-parent may
+be a *product* of the declared one. Accepting only `endsInside`'s
+direction costs 45 rendered divergences on the split scan — the guard
+then fires on the very element the change named. Accepting the extra
+direction in `endsInside` is not symmetric-and-therefore-fine: that
+guard excludes nodes, so extra matches make it fail open, which §9.1
+records as the direction a guard must not fail in.
+
+This also closes the §9.4 limitation recorded as "a range end whose
+left sibling is the merge-source tombstone under a surviving parent
+styles the merge target one-sidedly" (PBT counterexample
+`RemoveStyle(6, 8)` against `Edit(1, 5)`): the target is styled there
+because the range START moved into it, which is the question this guard
+asks. `pkg/document/tree_style_reached_set_test.go` pins both that pair
+and the `Style` mirror of it.
+
+Measured over the exhaustive scans in
+`pkg/document/tree_style_reached_set_test.go`
+(`<r><p>ab</p><p>cd</p><p>ef</p></r>`, one structural change against one
+style, both delivery orders):
+
+| scan | pairs | rendered divergences | tombstone-only |
+|---|---|---|---|
+| split × style | 1001 | 135 → **0** | 0 → **0** |
+| merge × style | 7098 | 297 → **0** | 2879 → **1292** |
+| nested split × style | 11592 | 2810 → 363 → **241** | 0 → **0** |
+
+The nested row splits `<r><p><p><p>abcd</p><p>efgh</p></p><p>ijkl</p></p></r>`
+at every position and at levels 1 and 2; its three counts are before
+Fix 25, after it, and after Fix 27. That family is not closed; see
+the known limitations below.
+
+The same numbers hold for `RemoveStyle` over a pre-bolded base, on
+every count, which is what sharing one range resolution has to mean.
+No pair that converged before diverges after, in either flat scan or
+in a 300-seed randomised sweep. The nested scan, added with Fix 27, is
+where that was not true: 188 of its pairs converged before Fix 25 and
+diverged after it. Fix 27 closes 36 of them and 86 older ones, and
+turns no converging pair into a diverging one; the other 152 remain.
+
+**Cross-implementation.** §9.1, §9.2, §9.5 and §9.6 change *which
+nodes* a `Tree.Style`/`Tree.RemoveStyle` writes to, and only the Go
+implementation has them. Until the JS SDK carries the same four rules,
+a JS client and the server disagree on the reached set for exactly the
+concurrent split/merge shapes above: the server's snapshot
+(`server/packs/snapshot.go` rebuilds through this code) then holds
+attributes a JS client applying the same changes locally does not, and
+the disagreement survives until that client reloads from a snapshot.
+This is a narrowing, not a widening — every shape listed here already
+diverged *between two Go replicas* by delivery order, which is strictly
+worse, and the two implementations agreed only in the sense that both
+were order-dependent. The scans quantify what moved: split × style 135
+rendered divergences → 0, merge × style 297 → 0. Porting is the
+follow-up tracked on the task; the Go-side fix is not held for it
+because leaving it out keeps Go replicas diverging from each other.
+
+Landing a reached-set rule Go-first is how this series has always
+worked, not a new exception. Fix 11 (§9.1), Fix 12 (§9.2), Fix 21
+(§9.3), Fix 22 and Fix 23 (§9.4) each changed which nodes a
+`Tree.Style` writes to, and each landed in this repository alone
+(#1909, #1928, #1954). Fix 10 in the same table is recorded as
+"JS-only". The cross-reference ledger tracks the two implementations
+converging fix by fix rather than commit by commit, because they sit in
+different repositories and one of them cannot be held while the other
+keeps replicas of a single implementation diverging from each other.
+What the issue says "has to land on the server and the JS SDK
+together" is the *durable shape* it proposes — the range resolved in a
+version-vector-filtered index space, which touches position resolution
+for `Edit` as well. That approach is not taken here; it is the open
+item at the end of §9.5, and it is the one that has to land as a pair.
+
+**Port specification.** The JS SDK is a separate repository
+(`yorkie-team/yorkie-js-sdk`), so the port cannot land in the same
+commit; it can land against a fixed spec. The four rules are stated
+here without reference to Go identifiers, each with the invariant that
+makes it decidable on any replica, so a port is a transcription rather
+than a re-derivation:
+
+1. **§9.1 End-token guard.** An element reached through its End token
+   is skipped when the element has a split sibling the change could not
+   have known (its creation ticket is not covered by the change's
+   version vector) *and* the change's range-end position named that
+   element — or a node in its split lineage — as its parent. When the
+   range ran past the element's end, the End token was in the range
+   before any split existed and the element is kept.
+2. **§9.2 Split-lineage closure.** A node the change reached stands for
+   every product of splitting it, forwards and backwards along the
+   split lineage, token type not consulted. When the traversal reaches
+   only a product the change could not have known, on its End token,
+   the family is added through the first member the change knew, and
+   only if all three hold:
+   (a) the range-end position was not declared inside the reached
+   product (its declared parent is neither that product nor below it,
+   ancestors matched along their split lineage as in rule 1);
+   (b) rule 1 and rule 4 would not skip that member's End token;
+   (c) the range-start position was declared inside that member (its
+   declared parent is the member or below it), matched in both
+   directions along the split lineage as in rule 4 — or, failing
+   that, it sits at or before that member's Start token in document
+   order, both indices counted with removed nodes included.
+   A range-start position whose parent or left sibling is unknown fails
+   (c). One whose left sibling is no longer a child of its declared
+   parent fails only the document-order half: it has no index, and an
+   offset lookup that returns -1 for a missing child instead of failing
+   must refuse it explicitly. Refusing the begins-inside half too would
+   drop the closure whenever a concurrent split moved that sibling.
+   Condition (c) is what a split of more than one level needs: it can
+   move the right half's End token into a range that began after the
+   known member.
+3. **§9.5 Boundary elements.** Independently of the traversal, the
+   reached set includes the ancestors of the change's own range-start
+   position (carried as End tokens) and of its range-end position
+   (carried as Start tokens), each chain stopping below the two
+   positions' common ancestor. These are computed from the positions
+   the change carries, never from the resolved index range, and are put
+   through the change-level skips (1, 2, §9.4's interloper filter) only
+   — not through the traversal-local from-side recovery restriction.
+   Skipped entirely when the two positions are equal, or when the range
+   resolves backwards with both declared ancestries live (a caller's
+   backwards range, not a merge-collapsed one).
+4. **§9.6 Range-start guard.** An element reached through its End token
+   alone — i.e. the resolved from-parent or one of its ancestors — is
+   skipped unless the change's range-start position named that element
+   as its parent. Matching runs in *both* directions along the split
+   lineage here, unlike §9.1: both halves of a split element are the
+   element the change began inside.
+
+Acceptance vectors, all replayable without a server:
+`TestStyleReachedSetMatchesComplexSuite` in
+`pkg/document/tree_style_reached_set_test.go` is thirteen two-change
+cases with rendered goldens and, where Marshal hides the answer, the
+attribute entries each live node must end up holding; the exhaustive
+scans in the same file fix the counts in the table above. A port that
+reproduces those numbers over the same base tree has the same reached
+set. Until it does, the divergence is the one described above.
+
+**Known limitations** (tracked as follow-ups):
+
+- The JS SDK port is yorkie-js-sdk#1404, which carries Fix 27, both
+  halves, and lands with it. Until both are released, server and JS
+  clients resolve different reached sets for the concurrent split/merge
+  shapes above (see **Cross-implementation**).
+- The two SDKs do not agree on a local edit that deletes across the
+  boundary a level-2 split just made. On the nested base,
+  `Edit(10, 10, nil, 2)` then `Edit(11, 13)` leaves the split as it is
+  in Go and merges it back under one parent in JS, so the same call
+  produces different operations. 129 pairs of the split-and-delete
+  scan above diverge in Go and not in JS, all of this shape (a level-2
+  split, then a delete right after it); the one traced comes from
+  this.
+- A split of the element a style's range-end position is declared in,
+  before that position, still diverges: 152 of the nested scan's 11592
+  pairs, all of which converged before Fix 25. The end position moves
+  into the new half while its declared parent still names the original
+  half, and the order that splits first styles that original half,
+  which the range never reached. The rule belongs with §9.5's boundary
+  elements and has to land in both SDKs together.
+- An edit-only divergence independent of styling (concurrent unwrap
+  versus merge-delete of the same paragraph) remains open.
+- Attributes still land on a different set of TOMBSTONES in the two
+  delivery orders (1292 of the merge scan's 7098 pairs): a removed
+  element the style covered strictly between its two anchors is still
+  resolved in the current index space, and a merge can move it out of
+  the resolved range. Nothing renders differently; see §9.5.
+- Within a collapsed from-side range, any *stamped* node fails open in
+  the other direction: a merge-moved element child at or after the
+  original from anchor (probe shape `<p>c<b/></p>`), an insert declared
+  inside the merged-away parent, or a child moved into the target by an
+  *earlier* merge the styler knew (and styled inside its range) all
+  carry a merge stamp, so the recovery cannot tell them from moved
+  content before the anchor and skips them — the writer styles them,
+  the applying replica does not. The pre-fix behavior styled nothing at
+  all there, so the recovery strictly narrows the divergence but does
+  not close this part.
+- A merge into a *sibling* (not the common parent) pulls the from
+  anchor inside that sibling, whose End token newly enters the range
+  and is styled on the merged replica only; the guard's direct-child
+  shape restriction deliberately excludes this shape (reproduces at
+  base, before Fix 23).
+- The recovery inherits the guard's direct-child shape restriction, so
+  a from-anchor collapsed by a *chained* merge (declared parent's
+  tombstone left under an intermediate source) gets no recovery and
+  keeps the pre-fix behavior of styling nothing on the applying
+  replica.
+- A node moved into the target by an *earlier, different* merge that
+  the styler knew (and therefore saw outside its range) also fails
+  open and is styled on the applying replica — the pre-§9.4 behavior;
+  distinguishing it from an earlier merge *into* the declared parent
+  would require provenance that path compression discards.
+- A relay-only merged parent (one whose children all arrived via an
+  earlier merge and keep the older source's `MergedFrom`) never gets
+  `mergedInto` set, so neither the stamp nor the filter activates in
+  that shape.
+- The stamp's `MergedAt` fallback reads the declared parent's
+  `removedAt` when no moved sibling survives to donate the immutable
+  merge ticket; `removedAt` is LWW-mutable, so the fallback can
+  disagree across replicas in GC-timing corners.
+- Stamped inserts participate in `propagateMergeDeletes` and in the
+  §1.1 redirect boundary scan; the delete cascade is intended
+  (declared-parent deletion should take the insert with it), but both
+  interactions widen `MergedFrom`'s original "physically moved"
+  meaning.
+
+## Key Design Decisions
+
+| Decision | Reason |
+|----------|--------|
+| Implicit move over explicit `TreeMove` op | Same fixes needed; Move adds protocol complexity |
+| Persist `MergedFrom` + `MergedAt` in proto | Durable merge witness; `MergedAt` is immutable (unlike `removedAt` which LWW overwrites) |
+| `mergedInto` as runtime cache only | Fast nil-check on hot path; rebuilt from `MergedFrom` on load |
+| Derive moved-children on demand | `target.Children(true) | where MergedFrom == source.id`; call sites already have the target |
+| Position-level advance for splits (§2) | `collectBetween`-level fix can't distinguish contained vs side-by-side delete |
+| End-token guard over range clamping (§9.1) | Clamping fails for element-level ranges; guard handles both text and element uniformly |
+| Relaxed parent check at ancestor splits (§7.5) | `InsNextID` is only set by `SplitElement`, so its existence is sufficient evidence |
+| `includeRemoved` in split loop offset (§7.6) | Must match `SplitElement`'s `Children(true)` partition to avoid boundary mismatch |
+| `skipActorID` in split loop advancement (§7.7) | Same-actor siblings are own split products, not concurrent; advancing past them diverges root from clone |
+| Boundary insert migration in SplitElement (§7.3) | CRDT position of concurrent insert is relative to pre-split child order; physical position after split is misleading |
+| Empty sibling re-parenting in Split (§7.4) | When a concurrent parent split already separated siblings into different parents, a replay split's empty product must follow the existing chain to be deterministic; VV-independent to preserve clone/root consistency |
+| Stop the §4.1 cascade at a known sibling seen alive | Keeps text the deleter never saw inside the deleted element, at the cost of converging fewer delivery orders than before: an unresolved trade, see §4.1 |
+| Narrow collectBetween only, preserve insert point (§3) | Adjusting fromLeft/fromParent for both delete and insert changes the insertion position, diverging from the other replica where §7.3's boundary migration handles placement |
+
+## Convergence Coverage
+
+### Hand-crafted integration suite (`test/integration/tree_test.go`)
+
+| Category | Total | Pass |
+|----------|------:|-----:|
+| Basic Edit + Edit | 27 | 27 |
+| Merge | 13 | 13 |
+| Split | 14 | 14 |
+| Style | 16 | 16 |
+| **Total** | **70** | **70** |
+
+The Merge category includes `TestTreeChainedMerge` (§6.3), which asserts
+both convergence and snapshot round-trip: after a chained merge, the tree
+reconstructed from the snapshot must match the runtime tree node-for-node.
+
+### Property-based suite (`test/complex/tree_concurrency_test.go`)
+
+| Suite | Pass | Skip (divergence) |
+|---|---:|---:|
+| EditEdit | 901 | 0 |
+| StyleStyle | 145 | 0 |
+| EditStyle | 85 | 0 |
+| SplitSplit | 321 | 0 |
+| SplitEdit | 145 | 0 |
+| **Total** | **1597** | **0** |
+
+Both tables predate §4.1's stop rule and count the suites as they stand,
+which is not the same as "nothing diverges": neither suite covers the
+shapes §4.1 lists as limitations, and the split × delete matrices in the
+property-based suite `t.Skip` on divergence rather than fail. The
+divergence §4.1 leaves is counted where it is produced —
+`pkg/document/tree_split_sibling_cascade_test.go` (12 of its 40 runs leave
+an extra empty element on one replica) and the skipped
+`TestTreeSplitSiblingCascadeResidueConverges`.
+
+### Clone/root consistency
+
+`syncClientsThenAssertEqual` and `syncClientsThenCheckEqual` now verify
+that each document's clone tree XML matches its root tree XML after
+sync. This catches bugs where `change.Execute(root, versionVector)`
+produces a different tree structure from `change.Execute(clone, nil)`.
+
+## Appendix: Fix Number Cross-Reference
+
+For traceability from git history (commit messages reference Fix N).
+
+| Fix | Section | Short Description |
+|-----|---------|-------------------|
+| Fix 1 | §4.1 | Split sibling cascade delete in collectBetween |
+| Fix 2 | §4.2 | Moved children guard in collectBetween |
+| Fix 3 | §1.1 | Merge-tombstone insert redirect |
+| Fix 4 | §1.1 + §6.1 | mergedInto forwarding pointer + merge data model |
+| Fix 5 | §6.2 | Delete propagation to merge-moved children |
+| Fix 6 | §1.2 | Inverted range no-op |
+| Fix 7 | §2 | Split sibling advance |
+| Fix 8 | §7.1 | SplitElement skips merge-moved children |
+| Fix 9 | §4.3 | Skip concurrent element merge |
+| Fix 10 | N/A | JS-only: splitElement uses raw children |
+| Fix 11 | §9.1 | End-token split sibling guard |
+| Fix 12 | §7.2 + §9.2 | Attribute copy + style propagation |
+| Fix 13 | §7.5 | Per-iteration advance in recursive split loop |
+| Fix 14 | §7.6 | Removed-inclusive offset in split loop |
+| Fix 15 | §7.7 | skipActorID in split loop |
+| Fix 16 | §7.3 | Boundary insert migration in SplitElement |
+| Fix 17 | §7.4 | Empty sibling re-parenting in Split |
+| Fix 18 | §3 | Cross-parent range narrowing |
+| Fix 19 | §6.1 | Move tombstones with merge to preserve RGA anchors |
+| Fix 20 | §6.3 | Flatten chained merge (P→Q→R) for redirect + snapshot consistency |
+| Fix 21 | §9.3 | Style range boundary right after merge-source tombstone |
+| Fix 22 | §9.4 | Intended-parent stamp + interloper filter at moved anchors |
+| Fix 23 | §9.4 | From-side recovery for style ranges collapsed by a merge |
+| Fix 24 | §7.8 + §7.5 | Order same-boundary split products by ticket |
+| Fix 25 | §9.1 + §9.2 + §9.5 + §9.6 | Style reached set decided by the change's own positions |
+| Fix 26 | §6.2 | Skip merge-delete propagation only at a declared boundary |
+| Fix 27 | §9.2 | Style a split family reached by End only if the change began at or in it |
+| Fix 28 | §4.1 | Stop the split-sibling cascade at a known sibling seen alive |

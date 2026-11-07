@@ -1,0 +1,213 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Package rpc provides the rpc server which is responsible for handling
+// requests from the client.
+package rpc
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"net"
+	"net/http"
+	"runtime/debug"
+	"time"
+
+	"connectrpc.com/connect"
+	"connectrpc.com/grpchealth"
+	"github.com/rs/cors"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
+	"github.com/yorkie-team/yorkie/api/yorkie/v1/v1connect"
+	"github.com/yorkie-team/yorkie/server/backend"
+	"github.com/yorkie-team/yorkie/server/logging"
+	"github.com/yorkie-team/yorkie/server/rpc/auth"
+	"github.com/yorkie-team/yorkie/server/rpc/httphealth"
+	"github.com/yorkie-team/yorkie/server/rpc/interceptors"
+)
+
+// maxRequestBytes bounds a single decoded request message. Without it,
+// connect-go reads a request body of any length, so one push can carry an
+// arbitrary number of changes and nothing but MongoDB's 16 MB BSON limit on
+// the snapshot stands in its way. The value sits above both the default
+// MaxSizePerDocument (10 MiB) and SnapshotBodyThreshold (12 MiB), so no pack
+// that could be stored durably is refused here.
+const maxRequestBytes = 16 * 1024 * 1024
+
+// Server is a normal server that processes the logic requested by the client.
+type Server struct {
+	conf                *Config
+	httpServer          *http.Server
+	yorkieServiceCancel context.CancelFunc
+}
+
+// NewServer creates a new instance of Server.
+func NewServer(conf *Config, be *backend.Backend) (*Server, error) {
+	tokenManager := auth.NewTokenManager(
+		be.Config.SecretKey,
+		be.Config.ParseAdminTokenDuration(),
+	)
+
+	yorkieInterceptor := interceptors.NewYorkieServiceInterceptor(be)
+	adminInterceptor := interceptors.NewAdminServiceInterceptor(be, tokenManager)
+	clusterInterceptor := interceptors.NewClusterServiceInterceptor(be, be.Config.ClusterSecret)
+	defaultInterceptor := interceptors.NewDefaultInterceptor()
+
+	opts := []connect.HandlerOption{
+		connect.WithInterceptors(
+			adminInterceptor,
+			yorkieInterceptor,
+			clusterInterceptor,
+			defaultInterceptor,
+		),
+		connect.WithReadMaxBytes(maxRequestBytes),
+		// NOTE(hackerwins): Without this, a panic in a handler is recovered by
+		// net/http, which resets the connection and leaves the caller with no
+		// response at all. Turning it into an Internal error keeps the bug
+		// visible in the log while the caller still gets an answer.
+		connect.WithRecover(func(ctx context.Context, _ connect.Spec, _ http.Header, p any) error {
+			logging.From(ctx).Errorf("panic in handler: %v\n%s", p, debug.Stack())
+			return connect.NewError(connect.CodeInternal, fmt.Errorf("internal error"))
+		}),
+	}
+
+	healthChecker := grpchealth.NewStaticChecker(
+		grpchealth.HealthV1ServiceName,
+		v1connect.YorkieServiceName,
+		v1connect.AdminServiceName,
+	)
+
+	readHeaderTimeout, err := conf.ParseReadHeaderTimeout()
+	if err != nil {
+		return nil, err
+	}
+
+	idleTimeout, err := conf.ParseIdleTimeout()
+	if err != nil {
+		return nil, err
+	}
+
+	yorkieServiceCtx, yorkieServiceCancel := context.WithCancel(context.Background())
+
+	mux := http.NewServeMux()
+	watches := newWatchRegistry()
+	mux.Handle(v1connect.NewYorkieServiceHandler(newYorkieServer(yorkieServiceCtx, be, watches), opts...))
+	mux.Handle(v1connect.NewAdminServiceHandler(newAdminServer(be, tokenManager, yorkieInterceptor), opts...))
+	mux.Handle(v1connect.NewClusterServiceHandler(newClusterServer(be, watches), opts...))
+	mux.Handle(auth.NewAuthHandler(be, tokenManager, conf.Auth))
+	mux.Handle(grpchealth.NewHandler(healthChecker))
+	mux.Handle(httphealth.NewHandler(healthChecker))
+
+	return &Server{
+		conf: conf,
+		httpServer: &http.Server{
+			Addr: fmt.Sprintf(":%d", conf.Port),
+			// ReadTimeout and WriteTimeout stay unset. They would cut
+			// long-lived streams such as WatchDocument.
+			ReadHeaderTimeout: readHeaderTimeout,
+			IdleTimeout:       idleTimeout,
+			Handler: h2c.NewHandler(newCORS().Handler(mux),
+				&http2.Server{
+					MaxConcurrentStreams: math.MaxUint32,
+					// http.Server's IdleTimeout does not reach h2c
+					// connections, so it is set here as well.
+					IdleTimeout: idleTimeout,
+				},
+			),
+		},
+		yorkieServiceCancel: yorkieServiceCancel,
+	}, nil
+}
+
+// Start starts this server by opening the rpc port.
+func (s *Server) Start() error {
+	return s.listenAndServe()
+}
+
+// Shutdown shuts down this server.
+func (s *Server) Shutdown(graceful bool) {
+	s.yorkieServiceCancel()
+
+	if graceful {
+		if err := s.httpServer.Shutdown(context.Background()); err != nil {
+			logging.DefaultLogger().Error("HTTP server Shutdown: %v", err)
+		}
+		return
+	}
+
+	if err := s.httpServer.Close(); err != nil {
+		logging.DefaultLogger().Error("HTTP server close: %v", err)
+	}
+}
+
+func (s *Server) listenAndServe() error {
+	// NOTE(hackerwins): The listener is opened here instead of inside the
+	// goroutine below. Otherwise Start would return before the port is bound,
+	// so a bind failure would be silently swallowed and a client dialing right
+	// after Start could be refused.
+	lis, err := net.Listen("tcp", s.httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", s.httpServer.Addr, err)
+	}
+
+	go func() {
+		logging.DefaultLogger().Infof(fmt.Sprintf("serving RPC on %d", s.conf.Port))
+
+		if s.conf.CertFile != "" && s.conf.KeyFile != "" {
+			// NOTE(hackerwins): Serve closes the listener on its own, but
+			// ServeTLS can bail out on HTTP/2 setup or key loading before it
+			// reaches Serve. Close here so a failed start does not leave the
+			// port bound, accepting connections nobody serves.
+			defer func() { _ = lis.Close() }()
+
+			if err := s.httpServer.ServeTLS(lis, s.conf.CertFile, s.conf.KeyFile); !errors.Is(err, http.ErrServerClosed) {
+				logging.DefaultLogger().Errorf("HTTP server ServeTLS: %v", err)
+			}
+			return
+		}
+
+		if err := s.httpServer.Serve(lis); !errors.Is(err, http.ErrServerClosed) {
+			logging.DefaultLogger().Errorf("HTTP server Serve: %v", err)
+		}
+	}()
+	return nil
+}
+
+func newCORS() *cors.Cors {
+	return cors.New(cors.Options{
+		AllowedMethods: []string{
+			http.MethodOptions,
+			http.MethodGet,
+			http.MethodPost,
+			http.MethodPut,
+			http.MethodDelete,
+		},
+		AllowOriginFunc: func(origin string) bool {
+			// NOTE(hackerwins): All origins are allowed at this level. Origin restrictions
+			// are enforced per project through middleware.
+			return true
+		},
+		AllowedHeaders: []string{"*"},
+		ExposedHeaders: []string{"*"},
+		// MaxAge indicates how long (in seconds) the results of a preflight request
+		// can be cached. FF caps this value at 24h, and modern Chrome caps it at 2h.
+		MaxAge:           int(2 * time.Hour / time.Second),
+		AllowCredentials: true,
+	})
+}

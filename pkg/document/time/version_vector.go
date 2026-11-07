@@ -1,0 +1,355 @@
+/*
+ * Copyright 2024 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package time
+
+import (
+	"bytes"
+	"fmt"
+	"maps"
+	"math"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+// InitialVersionVector is the initial version vector.
+var InitialVersionVector = VersionVector{}
+
+// VersionVector is similar to vector clock, but it is synced with Lamport
+// timestamp of the current change.
+type VersionVector map[ActorID]int64
+
+// NewVersionVector creates a new instance of VersionVector.
+func NewVersionVector() VersionVector {
+	return make(VersionVector)
+}
+
+// MinVersionVector returns the minimum version vector of the given version vectors.
+// It computes the element-wise minimum across all input vectors.
+// If any vector lacks a key, the minimum for that key is set to 0.
+func MinVersionVector(vectors ...VersionVector) VersionVector {
+	if len(vectors) == 0 {
+		return InitialVersionVector
+	}
+
+	keySet := make(map[ActorID]struct{})
+	for _, vec := range vectors {
+		for k := range vec {
+			keySet[k] = struct{}{}
+		}
+	}
+
+	minVec := make(VersionVector)
+	for k := range keySet {
+		minValue := int64(math.MaxInt64)
+		for _, vec := range vectors {
+			if v, ok := vec[k]; ok {
+				minValue = min(minValue, v)
+			} else {
+				minValue = 0
+				break
+			}
+		}
+
+		minVec[k] = minValue
+	}
+
+	return minVec
+}
+
+// VersionVectorFromBytes creates a new instance of VersionVector from the given bytes.
+func VersionVectorFromBytes(data []byte) (VersionVector, error) {
+	buffer := bytes.NewReader(data)
+	vv := NewVersionVector()
+
+	// Read the number of entries
+	length, err := readInt64(buffer)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read each ActorID and its corresponding version
+	for range length {
+		var actorID ActorID
+		if _, err := buffer.Read(actorID[:]); err != nil {
+			return nil, fmt.Errorf("read ActorID: %w", err)
+		}
+
+		version, err := readInt64(buffer)
+		if err != nil {
+			return nil, err
+		}
+
+		vv[actorID] = version
+	}
+
+	return vv, nil
+}
+
+// TicketKnown reports whether the given ticket is causally known to a change
+// carrying this vector: the vector covers the ticket's lamport clock for the
+// same actor. An empty vector is a local change, which by definition has seen
+// everything in its own replica.
+//
+// This is the causality primitive the CRDTs ask "did the editor know about
+// this?" with -- whether "this" is a node's creation, its removal, or a split
+// sibling. The JS SDK keeps the same function in the same place
+// (time/version_vector.ts); the two have to answer identically or the same
+// operation is known on one side and unknown on the other.
+func TicketKnown(vv VersionVector, ticket *Ticket) bool {
+	if len(vv) == 0 {
+		return true
+	}
+
+	if l, ok := vv.Get(ticket.ActorID()); ok && l >= ticket.Lamport() {
+		return true
+	}
+
+	return false
+}
+
+// Get gets the version of the given actor.
+// Returns the version and whether the actor exists in the vector.
+func (v VersionVector) Get(id ActorID) (int64, bool) {
+	version, exists := v[id]
+	return version, exists
+}
+
+// Set sets the given actor's version to the given value.
+func (v VersionVector) Set(id ActorID, i int64) {
+	v[id] = i
+}
+
+// Unset removes the version for the given actor from the VersionVector.
+func (v VersionVector) Unset(id ActorID) {
+	delete(v, id)
+}
+
+// VersionOf returns the version of the given actor.
+func (v VersionVector) VersionOf(id ActorID) int64 {
+	return v[id]
+}
+
+// DeepCopy creates a deep copy of this VersionVector.
+func (v VersionVector) DeepCopy() VersionVector {
+	copied := NewVersionVector()
+	maps.Copy(copied, v)
+	return copied
+}
+
+// Marshal returns the JSON encoding of this VersionVector.
+func (v VersionVector) Marshal() string {
+	builder := strings.Builder{}
+
+	builder.WriteRune('{')
+
+	keys := slices.SortedFunc(maps.Keys(v), func(a, b ActorID) int {
+		return bytes.Compare(a[:], b[:])
+	})
+
+	isFirst := true
+	for _, k := range keys {
+		if !isFirst {
+			builder.WriteRune(',')
+		}
+
+		id, err := ActorIDFromBytes(k[:])
+		if err != nil {
+			panic(err)
+		}
+
+		builder.WriteString(id.String())
+		builder.WriteRune(':')
+		builder.WriteString(strconv.FormatInt(v[k], 10))
+		isFirst = false
+	}
+	builder.WriteRune('}')
+
+	return builder.String()
+}
+
+// Equal returns whether this VersionVector is equal to the given VersionVector.
+func (v VersionVector) Equal(other VersionVector) bool {
+	if len(v) != len(other) {
+		return false
+	}
+
+	for k, val := range v {
+		if val != other[k] {
+			return false
+		}
+	}
+
+	for k, val := range other {
+		if v[k] != val {
+			return false
+		}
+	}
+
+	return true
+}
+
+// AfterOrEqual returns whether this VersionVector is causally after or equal
+// the given VersionVector.
+func (v VersionVector) AfterOrEqual(other VersionVector) bool {
+	for k, val := range v {
+		if val < other[k] {
+			return false
+		}
+	}
+
+	for k, val := range other {
+		if v[k] < val {
+			return false
+		}
+	}
+
+	return true
+}
+
+// EqualToOrAfter returns whether this VersionVector's every field is equal or after than given ticket.
+func (v VersionVector) EqualToOrAfter(other *Ticket) bool {
+	clientLamport, ok := v[other.actorID]
+
+	if !ok {
+		return false
+	}
+
+	return clientLamport >= other.lamport
+}
+
+// Min modifies the receiver in-place to contain the minimum values between itself
+// and the given version vector.
+// Note: This method modifies the receiver for memory efficiency.
+func (v VersionVector) Min(other *VersionVector) {
+	for key, value := range v {
+		if otherValue, exists := (*other)[key]; exists {
+			v[key] = min(value, otherValue)
+		} else {
+			v[key] = 0
+		}
+	}
+
+	for key := range *other {
+		if _, exists := v[key]; !exists {
+			v[key] = 0
+		}
+	}
+}
+
+// Max modifies the receiver in-place to contain the maximum values between itself
+// and the given version vector.
+// Note: This method modifies the receiver for memory efficiency.
+func (v VersionVector) Max(other *VersionVector) {
+	for key, value := range v {
+		if otherValue, exists := (*other)[key]; exists {
+			v[key] = max(value, otherValue)
+		}
+	}
+
+	for key, value := range *other {
+		if _, exists := v[key]; !exists {
+			v[key] = value
+		}
+	}
+}
+
+// MaxLamport returns max lamport value in version vector.
+func (v VersionVector) MaxLamport() int64 {
+	var maxLamport int64 = -1
+
+	for _, value := range v {
+		maxLamport = max(maxLamport, value)
+	}
+
+	return maxLamport
+}
+
+// Filter returns filtered version vector which keys are only from filter
+func (v VersionVector) Filter(filter []ActorID) VersionVector {
+	filteredVV := NewVersionVector()
+
+	for _, value := range filter {
+		filteredVV[value] = v[value]
+	}
+
+	return filteredVV
+}
+
+// Keys returns a slice of ActorIDs present in the VersionVector.
+func (v VersionVector) Keys() ([]ActorID, error) {
+	var actors []ActorID
+
+	for id := range v {
+		actorID, err := ActorIDFromBytes(id[:])
+		if err != nil {
+			return nil, err
+		}
+
+		actors = append(actors, actorID)
+	}
+
+	return actors, nil
+}
+
+// Bytes returns the byte representation of the VersionVector.
+func (v VersionVector) Bytes() ([]byte, error) {
+	buffer := bytes.Buffer{}
+
+	// Write the number of entries in the VersionVector
+	if err := writeInt64(&buffer, int64(len(v))); err != nil {
+		return nil, fmt.Errorf("write length: %w", err)
+	}
+
+	// Write each ActorID and its corresponding version
+	for actorID, version := range v {
+		if _, err := buffer.Write(actorID[:]); err != nil {
+			return nil, fmt.Errorf("write ActorID: %w", err)
+		}
+		if err := writeInt64(&buffer, version); err != nil {
+			return nil, fmt.Errorf("write version: %w", err)
+		}
+	}
+
+	return buffer.Bytes(), nil
+}
+
+func writeInt64(buffer *bytes.Buffer, value int64) error {
+	data := make([]byte, 8)
+	for i := range 8 {
+		data[i] = byte(value >> (56 - i*8))
+	}
+
+	if _, err := buffer.Write(data); err != nil {
+		return fmt.Errorf("write int64: %w", err)
+	}
+
+	return nil
+}
+
+func readInt64(buffer *bytes.Reader) (int64, error) {
+	data := make([]byte, 8)
+	if _, err := buffer.Read(data); err != nil {
+		return 0, fmt.Errorf("read int64: %w", err)
+	}
+
+	var value int64
+	for i := range 8 {
+		value = (value << 8) | int64(data[i])
+	}
+	return value, nil
+}

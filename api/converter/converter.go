@@ -1,0 +1,74 @@
+/*
+ * Copyright 2021 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Package converter provides the converter for converting model to
+// Protobuf, bytes and vice versa.
+package converter
+
+import (
+	"github.com/yorkie-team/yorkie/pkg/errors"
+)
+
+var (
+	// ErrPackRequired is returned when an empty pack is passed.
+	ErrPackRequired = errors.InvalidArgument("pack required").WithCode("ErrPackRequired")
+
+	// ErrCheckpointRequired is returned when a pack with an empty checkpoint is
+	// passed.
+	ErrCheckpointRequired = errors.InvalidArgument("checkpoint required").WithCode("ErrCheckpointRequired")
+
+	// ErrUnsupportedOperation is returned when the given operation is not
+	// supported yet.
+	ErrUnsupportedOperation = errors.InvalidArgument("unsupported operation").WithCode("ErrUnsupportedOperation")
+
+	// ErrUnsupportedElement is returned when the given element is not
+	// supported yet.
+	ErrUnsupportedElement = errors.InvalidArgument("unsupported element").WithCode("ErrUnsupportedElement")
+
+	// ErrUnsupportedEventType is returned when the given event type is not
+	// supported yet.
+	ErrUnsupportedEventType = errors.InvalidArgument("unsupported event type").WithCode("ErrUnsupportedEventType")
+
+	// ErrUnsupportedValueType is returned when the given value type is not
+	// supported yet.
+	ErrUnsupportedValueType = errors.InvalidArgument("unsupported value type").WithCode("ErrUnsupportedValueType")
+
+	// ErrUnsupportedCounterType is returned when the given counter type is not
+	// supported yet.
+	ErrUnsupportedCounterType = errors.InvalidArgument("unsupported counter type").WithCode("ErrUnsupportedCounterType")
+
+	// ErrUnsupportedPresenceChangeType is returned when the given presence
+	// change type is not defined in this build's wire format.
+	ErrUnsupportedPresenceChangeType = errors.InvalidArgument(
+		"unsupported presence change type",
+	).WithCode("ErrUnsupportedPresenceChangeType")
+
+	// ErrInvalidRestoreSpan is returned when a restore span is malformed:
+	// a nil entry, a negative or inverted Start/End offset, or a range
+	// whose length doesn't match its Content.
+	ErrInvalidRestoreSpan = errors.InvalidArgument("invalid restore span").WithCode("ErrInvalidRestoreSpan")
+
+	// ErrInvalidSplitLevel is returned when a TreeEdit's split level is
+	// negative. A split level counts element boundaries to create, so it has
+	// no meaning below zero.
+	ErrInvalidSplitLevel = errors.InvalidArgument("invalid split level").WithCode("ErrInvalidSplitLevel")
+
+	// ErrMissingTicket is returned when a time ticket a well-formed operation
+	// always carries is absent. Every such rejection wraps this sentinel so the
+	// stored-decode path (FromStoredOperations) can tell an operation that can
+	// never be applied apart from a decode failure it must surface.
+	ErrMissingTicket = errors.InvalidArgument("missing time ticket").WithCode("ErrMissingTicket")
+)

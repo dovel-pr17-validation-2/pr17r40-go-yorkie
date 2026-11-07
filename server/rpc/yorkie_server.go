@@ -1,0 +1,2201 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package rpc
+
+import (
+	"context"
+	stderrors "errors"
+	"sync"
+	gotime "time"
+
+	"connectrpc.com/connect"
+
+	"github.com/yorkie-team/yorkie/api/converter"
+	"github.com/yorkie-team/yorkie/api/types"
+	"github.com/yorkie-team/yorkie/api/types/events"
+	api "github.com/yorkie-team/yorkie/api/yorkie/v1"
+	"github.com/yorkie-team/yorkie/pkg/document"
+	"github.com/yorkie-team/yorkie/pkg/document/change"
+	"github.com/yorkie-team/yorkie/pkg/document/time"
+	"github.com/yorkie-team/yorkie/pkg/errors"
+	"github.com/yorkie-team/yorkie/pkg/key"
+	"github.com/yorkie-team/yorkie/server/backend"
+	"github.com/yorkie-team/yorkie/server/backend/database"
+	"github.com/yorkie-team/yorkie/server/backend/messaging"
+	"github.com/yorkie-team/yorkie/server/backend/pubsub"
+	"github.com/yorkie-team/yorkie/server/clients"
+	"github.com/yorkie-team/yorkie/server/documents"
+	"github.com/yorkie-team/yorkie/server/logging"
+	"github.com/yorkie-team/yorkie/server/packs"
+	"github.com/yorkie-team/yorkie/server/projects"
+	"github.com/yorkie-team/yorkie/server/revisions"
+	"github.com/yorkie-team/yorkie/server/rpc/auth"
+	"github.com/yorkie-team/yorkie/server/rpc/metadata"
+	"github.com/yorkie-team/yorkie/server/schemas"
+)
+
+// maxWatchResources is the largest number of resource descriptors a single
+// Watch request may carry. Every descriptor costs a database read, a
+// subscription slot and a goroutine for the life of the stream, so an
+// unbounded list lets one request amplify into arbitrary server work. The
+// bound is well above any realistic client: the SDKs open one stream per
+// resource today, and even a client multiplexing every document it has open
+// stays far below it.
+const maxWatchResources = 100
+
+var (
+	// ErrNoResources is returned when a Watch request carries no resource to
+	// subscribe to. Such a stream has nothing to deliver, so it is rejected
+	// instead of being left open.
+	ErrNoResources = errors.InvalidArgument(
+		"no resources to watch",
+	).WithCode("ErrNoResources")
+
+	// ErrTooManyResources is returned when a Watch request carries more
+	// resource descriptors than maxWatchResources.
+	ErrTooManyResources = errors.InvalidArgument(
+		"too many resources to watch",
+	).WithCode("ErrTooManyResources")
+
+	// ErrUnsupportedResource is returned when a Watch request carries a
+	// resource descriptor this server cannot subscribe to: one with its
+	// resource oneof unset, or one naming a type added after this server was
+	// built. Skipping it would leave the client watching fewer resources than
+	// it asked for, with nothing saying so.
+	ErrUnsupportedResource = errors.InvalidArgument(
+		"unsupported resource descriptor",
+	).WithCode("ErrUnsupportedResource")
+
+	// ErrDocumentKeyMismatch is returned when the change pack of a request
+	// names a document key other than the key of the document the request
+	// targets by ID. The auth webhook is asked about the pack's key, so the
+	// two must name the same document.
+	ErrDocumentKeyMismatch = errors.InvalidArgument(
+		"change pack key does not match the document",
+	).WithCode("ErrDocumentKeyMismatch")
+
+	// ErrSubscriptionsClosed is returned when every subscription behind a
+	// Watch stream has closed itself. That only happens through the
+	// self-prune fallback in pubsub.Subscription.Publish, which is a
+	// server-side decision that the client neither asked for nor can detect:
+	// ending the stream cleanly would read as a completed watch and no SDK
+	// would reconnect, leaving the client attached but permanently desynced.
+	// A retriable status sends it back through its reconnect path instead.
+	ErrSubscriptionsClosed = errors.Unavailable(
+		"watch subscriptions closed",
+	).WithCode("ErrSubscriptionsClosed")
+)
+
+type yorkieServer struct {
+	backend    *backend.Backend
+	serviceCtx context.Context
+	watches    *watchRegistry
+
+	// heartbeat is what this server does with the interval a Watch stream
+	// asks for. Parsed once here rather than per stream, so a malformed value
+	// fails at startup instead of mid-request.
+	heartbeat backend.WatchHeartbeatPolicy
+}
+
+// newYorkieServer creates a new instance of yorkieServer
+func newYorkieServer(
+	serviceCtx context.Context,
+	be *backend.Backend,
+	watches *watchRegistry,
+) *yorkieServer {
+	return &yorkieServer{
+		backend:    be,
+		watches:    watches,
+		serviceCtx: serviceCtx,
+		heartbeat:  be.Config.ParseWatchHeartbeatPolicy(),
+	}
+}
+
+// resolveHeartbeatInterval returns the heartbeat interval this server will
+// actually use for a stream that asked for requestedMs milliseconds.
+//
+// A zero maximum is the server-wide kill switch and wins over everything
+// else. Otherwise the stream gets what it asked for, clamped into the
+// server's bounds so one client cannot set the server's heartbeat load by
+// asking for a very short interval. A request of 0 gets 0: that is both what
+// an SDK older than the heartbeat leaves on the wire and what a newer one
+// sends to opt out, and either way the stream gets no WatchHeartbeat bodies.
+//
+// There is deliberately no operator override that serves a stream which did
+// not ask. A WatchHeartbeat is a new case on the response oneof, and a client
+// older than it -- this repo's own Go client up to v0.7.24 -- ends its watch
+// on the first one, which is the breakage the per-stream opt-in exists to
+// avoid. Server-side detection of a half-open stream whose peer did not opt
+// in belongs to the transport (HTTP/2 PING), which every client handles.
+func (s *yorkieServer) resolveHeartbeatInterval(requestedMs int64) gotime.Duration {
+	if s.heartbeat.Max <= 0 {
+		return 0
+	}
+	if requestedMs <= 0 {
+		return 0
+	}
+
+	requested := gotime.Duration(requestedMs) * gotime.Millisecond
+	if requested < s.heartbeat.Min {
+		return s.heartbeat.Min
+	}
+	if requested > s.heartbeat.Max {
+		return s.heartbeat.Max
+	}
+
+	return requested
+}
+
+// ActivateClient activates the given client.
+func (s *yorkieServer) ActivateClient(
+	ctx context.Context,
+	req *connect.Request[api.ActivateClientRequest],
+) (*connect.Response[api.ActivateClientResponse], error) {
+	if req.Msg.ClientKey == "" {
+		return nil, clients.ErrInvalidClientKey
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method: types.ActivateClient,
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+	cli, err := clients.Activate(ctx, s.backend, project, req.Msg.ClientKey, req.Msg.Metadata)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.backend.MsgBroker.Produce(
+		ctx,
+		messaging.ClientEventMessage{
+			ProjectID: project.ID.String(),
+			ClientID:  cli.ID.String(),
+			Timestamp: gotime.Now(),
+			EventType: events.ClientActivatedEvent,
+		},
+	); err != nil {
+		logging.From(ctx).Errorf("failed to produce client event: %v", err)
+	}
+
+	if userID, exist := req.Msg.Metadata["userID"]; exist && userID != "" {
+		if err := s.backend.MsgBroker.Produce(
+			ctx,
+			messaging.UserEventMessage{
+				UserID:    userID,
+				Timestamp: gotime.Now(),
+				EventType: events.ClientActivatedEvent,
+				ProjectID: project.ID.String(),
+				UserAgent: req.Header().Get("x-yorkie-user-agent"),
+			},
+		); err != nil {
+			logging.From(ctx).Errorf("failed to produce user event: %v", err)
+		}
+	}
+
+	return connect.NewResponse(&api.ActivateClientResponse{
+		ClientId: cli.ID.String(),
+		ActorId:  cli.StableActorID.String(),
+	}), nil
+}
+
+// DeactivateClient deactivates the given client.
+func (s *yorkieServer) DeactivateClient(
+	ctx context.Context,
+	req *connect.Request[api.DeactivateClientRequest],
+) (*connect.Response[api.DeactivateClientResponse], error) {
+	actorID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method: types.DeactivateClient,
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+
+	if req.Msg.Synchronous {
+		if _, err := clients.Deactivate(ctx, s.backend, project, types.ClientRefKey{
+			ProjectID: project.ID,
+			ClientID:  types.IDFromActorID(actorID),
+		}); err != nil {
+			return nil, err
+		}
+
+		if err := s.backend.MsgBroker.Produce(
+			ctx,
+			messaging.ClientEventMessage{
+				ProjectID: project.ID.String(),
+				ClientID:  actorID.String(),
+				Timestamp: gotime.Now(),
+				EventType: events.ClientDeactivatedEvent,
+			},
+		); err != nil {
+			logging.From(ctx).Errorf("failed to produce client deactivation event: %v", err)
+		}
+
+		return connect.NewResponse(&api.DeactivateClientResponse{}), nil
+	}
+
+	// Use DeactivateAsync to handle cases where browser window is closed
+	// and the context might be cancelled before deactivation completes
+	if err = clients.DeactivateAsync(s.backend, project, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(actorID),
+	}); err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&api.DeactivateClientResponse{}), nil
+}
+
+// AttachDocument attaches the given document to the client.
+func (s *yorkieServer) AttachDocument(
+	ctx context.Context,
+	req *connect.Request[api.AttachDocumentRequest],
+) (*connect.Response[api.AttachDocumentResponse], error) {
+	// 01. Validate the request and verify access
+	actorID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	pack, err := fromChangePack(req.Msg.ChangePack, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := pack.DocumentKey.Validate(); err != nil {
+		return nil, err
+	}
+
+	attrs := auth.AccessAttributes(pack)
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.AttachDocument,
+		Attributes: attrs,
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+
+	docLocker := s.backend.Lockers.LockerWithRLock(packs.DocKey(project.ID, pack.DocumentKey))
+	defer docLocker.RUnlock()
+	locker := s.backend.Lockers.Locker(packs.DocPullKey(actorID, pack.DocumentKey))
+	defer locker.Unlock()
+
+	clientInfo, err := clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(actorID),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 02. Ensure the document exists and is attached to the client. Creating
+	// the document writes it, and the create fixates disable_presence for
+	// every attach that follows, so an attach that was not approved as a
+	// document write is asked for the write first, the same way a schema
+	// rebind is.
+	if err := s.verifyDocCreation(ctx, project, attrs, pack.DocumentKey); err != nil {
+		return nil, err
+	}
+
+	// The disable_presence flag is fixated on first attach via $setOnInsert;
+	// the persisted value wins for later attaches, so we log a warning
+	// when the requested value disagrees with what came back.
+	docInfo, err := documents.FindOrCreateDocInfo(
+		ctx, s.backend, clientInfo, pack.DocumentKey, req.Msg.DisablePresence,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if req.Msg.DisablePresence != docInfo.DisablePresence {
+		logging.From(ctx).Warnf(
+			"attach with disable_presence=%v but doc fixated to %v: %s",
+			req.Msg.DisablePresence, docInfo.DisablePresence, docInfo.Key,
+		)
+	}
+
+	// pack.Checkpoint.ClientSeq is the client's projected checkpoint
+	// (acked baseline + len(changes), from createChangePack.increaseClientSeq).
+	// Recover the acked baseline so a resumed client's ClientDocInfo is seeded at
+	// the baseline; its pending changes then validate and advance from there.
+	baseline := pack.Checkpoint
+	if n := uint32(pack.ChangesLen()); baseline.ClientSeq >= n {
+		baseline = change.NewCheckpoint(pack.Checkpoint.ServerSeq, pack.Checkpoint.ClientSeq-n)
+	}
+	clientInfo, err = clients.AttachDocument(ctx, s.backend, clientInfo, docInfo, pack.IsAttached(), pack.Epoch, baseline)
+	if err != nil {
+		return nil, err
+	}
+
+	// The attach writes the client row — TryAttaching above, then
+	// UpdateClientInfoAfterPushPull below — on this node only, and a row is
+	// cached per node. Without this the peers keep a copy that still says the
+	// document is not attached, and since nothing refills it (the bulk read in
+	// FindAttachedClientInfosByRefKey deliberately no longer caches, as the
+	// rows it reads run outside the client's cache lock) the gates reading it
+	// would reject the client for as long as the entry survives eviction.
+	// Deferred so it also covers the attaching row left behind when a step
+	// between here and the push fails.
+	defer clients.InvalidateCachedClient(ctx, s.backend, clientInfo.RefKey())
+
+	docKey := types.DocRefKey{ProjectID: project.ID, DocID: docInfo.ID}
+	schemaName, schemaVersion, err := converter.FromSchemaKey(docInfo.Schema)
+	if err != nil {
+		return nil, err
+	}
+	schema, err := schemas.GetSchema(ctx, s.backend, project.ID, schemaName, schemaVersion)
+	if err != nil {
+		return nil, err
+	}
+	if project.HasAttachmentLimit() || project.RemoveOnDetach || (docInfo.Schema == "" && req.Msg.SchemaKey != "") {
+		locker := s.backend.Lockers.Locker(documents.DocAttachmentKey(docKey))
+		defer locker.Unlock()
+
+		count, err := documents.FindAttachedClientCount(ctx, s.backend, docKey)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := project.IsAttachmentLimitExceeded(count); err != nil {
+			return nil, err
+		}
+
+		rebind := false
+		if count == 0 {
+			if rebind, err = s.canRebindSchema(ctx, attrs, pack.DocumentKey, req.Msg.SchemaKey, docInfo.Schema); err != nil {
+				return nil, err
+			}
+		}
+
+		if rebind {
+			schemaName, schemaVersion, err = converter.FromSchemaKey(req.Msg.SchemaKey)
+			if err != nil {
+				return nil, err
+			}
+			schema, err = schemas.GetSchema(ctx, s.backend, project.ID, schemaName, schemaVersion)
+			if err != nil {
+				return nil, err
+			}
+			if err := documents.UpdateDocInfoSchema(ctx, s.backend, docInfo.RefKey(), req.Msg.SchemaKey); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// 03. Push/Pull between the client and server.
+	pulled, err := packs.PushPull(ctx, s.backend, project, clientInfo, docKey, pack, packs.PushPullOptions{
+		Mode:            types.SyncModePushPull,
+		Status:          document.StatusAttached,
+		DisableGC:       req.Msg.DisableGc,
+		DisablePresence: docInfo.DisablePresence,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	pbChangePack, err := pulled.ToPBChangePack()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.backend.MsgBroker.Produce(
+		ctx,
+		messaging.DocumentEventMessage{
+			ProjectID:   project.ID.String(),
+			DocumentKey: docInfo.Key.String(),
+			ActorID:     actorID.String(),
+			Timestamp:   gotime.Now(),
+			EventType:   events.DocAttached,
+		},
+	); err != nil {
+		logging.From(ctx).Errorf("failed to produce document event: %v", err)
+	}
+
+	response := &api.AttachDocumentResponse{
+		ChangePack:         pbChangePack,
+		DocumentId:         docInfo.ID.String(),
+		MaxSizePerDocument: int32(project.MaxSizePerDocument),
+		DisablePresence:    docInfo.DisablePresence,
+	}
+	if schema != nil {
+		response.SchemaRules = converter.ToRules(schema.Rules)
+	}
+	return connect.NewResponse(response), nil
+}
+
+// AttachChannel attaches the given channel to the client.
+func (s *yorkieServer) AttachChannel(
+	ctx context.Context,
+	req *connect.Request[api.AttachChannelRequest],
+) (*connect.Response[api.AttachChannelResponse], error) {
+	// 01. Validate the request and verify access
+	actorID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+	channelKey := key.Key(req.Msg.ChannelKey)
+	if err := channelKey.Validate(); err != nil {
+		return nil, err
+	}
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.AttachChannel,
+		Attributes: types.NewAccessAttributes([]key.Key{channelKey}, types.ReadWrite),
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+	_, err = clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(actorID),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 02. Create ChannelRefKey and attach to channel
+	refKey := types.ChannelRefKey{
+		ProjectID:  project.ID,
+		ChannelKey: channelKey,
+	}
+
+	sessionID, sessionCount, err := s.backend.Channel.Attach(ctx, refKey, actorID)
+	if err != nil {
+		return nil, err
+	}
+
+	response := &api.AttachChannelResponse{
+		SessionId:    sessionID.String(),
+		SessionCount: sessionCount,
+	}
+	return connect.NewResponse(response), nil
+}
+
+// DetachChannel detaches the given channel from the client.
+func (s *yorkieServer) DetachChannel(
+	ctx context.Context,
+	req *connect.Request[api.DetachChannelRequest],
+) (*connect.Response[api.DetachChannelResponse], error) {
+	// 01. Validate the request and verify access
+	actorID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+	channelKey := key.Key(req.Msg.ChannelKey)
+	if err := channelKey.Validate(); err != nil {
+		return nil, err
+	}
+	sessionID := types.ID(req.Msg.SessionId)
+	if err := sessionID.Validate(); err != nil {
+		return nil, err
+	}
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.DetachChannel,
+		Attributes: types.NewAccessAttributes([]key.Key{channelKey}, types.ReadWrite),
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+	_, err = clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(actorID),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 02. Detach using presence ID
+	sessionCount, err := s.backend.Channel.Detach(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	response := &api.DetachChannelResponse{
+		SessionCount: sessionCount,
+	}
+	return connect.NewResponse(response), nil
+}
+
+// RefreshChannel refreshes the TTL of the given channel.
+func (s *yorkieServer) RefreshChannel(
+	ctx context.Context,
+	req *connect.Request[api.RefreshChannelRequest],
+) (*connect.Response[api.RefreshChannelResponse], error) {
+	channelKey := key.Key(req.Msg.ChannelKey)
+	if err := channelKey.Validate(); err != nil {
+		return nil, err
+	}
+
+	// First-call path: when session_id is empty, this RPC subsumes
+	// ActivateClient + AttachChannel + RefreshChannel into a single round trip.
+	// Subsequent heartbeats keep the prior session_id and skip activate/attach.
+	if req.Msg.SessionId == "" {
+		return s.firstChannelRefresh(ctx, req, channelKey)
+	}
+
+	// Heartbeat path: refresh the TTL of an existing session.
+	return s.heartbeatChannelRefresh(ctx, req, channelKey)
+}
+
+// firstChannelRefresh handles the first RefreshChannel call from a client.
+// It activates the client (if needed), attaches it to the channel, and
+// refreshes the TTL — returning the freshly allocated client_id and
+// session_id so the client can include them in subsequent heartbeats.
+func (s *yorkieServer) firstChannelRefresh(
+	ctx context.Context,
+	req *connect.Request[api.RefreshChannelRequest],
+	channelKey key.Key,
+) (*connect.Response[api.RefreshChannelResponse], error) {
+	if req.Msg.ClientKey == "" {
+		return nil, clients.ErrInvalidClientKey
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method: types.ActivateClient,
+	}); err != nil {
+		return nil, err
+	}
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.AttachChannel,
+		Attributes: types.NewAccessAttributes([]key.Key{channelKey}, types.ReadWrite),
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+	cli, err := clients.Activate(ctx, s.backend, project, req.Msg.ClientKey, req.Msg.Metadata)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.backend.MsgBroker.Produce(
+		ctx,
+		messaging.ClientEventMessage{
+			ProjectID: project.ID.String(),
+			ClientID:  cli.ID.String(),
+			Timestamp: gotime.Now(),
+			EventType: events.ClientActivatedEvent,
+		},
+	); err != nil {
+		logging.From(ctx).Errorf("failed to produce client event: %v", err)
+	}
+
+	if userID, exist := req.Msg.Metadata["userID"]; exist && userID != "" {
+		if err := s.backend.MsgBroker.Produce(
+			ctx,
+			messaging.UserEventMessage{
+				UserID:    userID,
+				Timestamp: gotime.Now(),
+				EventType: events.ClientActivatedEvent,
+				ProjectID: project.ID.String(),
+				UserAgent: req.Header().Get("x-yorkie-user-agent"),
+			},
+		); err != nil {
+			logging.From(ctx).Errorf("failed to produce user event: %v", err)
+		}
+	}
+
+	actorID, err := cli.ID.ToActorID()
+	if err != nil {
+		return nil, err
+	}
+
+	refKey := types.ChannelRefKey{
+		ProjectID:  project.ID,
+		ChannelKey: channelKey,
+	}
+	sessionID, sessionCount, err := s.backend.Channel.Attach(ctx, refKey, actorID)
+	if err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&api.RefreshChannelResponse{
+		SessionCount: sessionCount,
+		ClientId:     cli.ID.String(),
+		SessionId:    sessionID.String(),
+	}), nil
+}
+
+// heartbeatChannelRefresh handles subsequent RefreshChannel calls that carry
+// an existing session_id. Liveness is proven by the session_id itself —
+// the server issued it at first-call time, and the channel manager keeps
+// it in an in-memory map — so there is no per-heartbeat MongoDB read.
+// If the session has already been swept by the cleanup ticker, the
+// in-memory Refresh returns ErrSessionNotFound and the caller is expected
+// to start a new first-call cycle.
+func (s *yorkieServer) heartbeatChannelRefresh(
+	ctx context.Context,
+	req *connect.Request[api.RefreshChannelRequest],
+	channelKey key.Key,
+) (*connect.Response[api.RefreshChannelResponse], error) {
+	if _, err := time.ActorIDFromHex(req.Msg.ClientId); err != nil {
+		return nil, err
+	}
+	sessionID := types.ID(req.Msg.SessionId)
+	if err := sessionID.Validate(); err != nil {
+		return nil, err
+	}
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.RefreshChannel,
+		Attributes: types.NewAccessAttributes([]key.Key{channelKey}, types.ReadWrite),
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := s.backend.Channel.Refresh(ctx, sessionID); err != nil {
+		return nil, err
+	}
+
+	refKey := types.ChannelRefKey{
+		ProjectID:  projects.From(ctx).ID,
+		ChannelKey: channelKey,
+	}
+	sessionCount := s.backend.Channel.SessionCount(refKey, false)
+
+	return connect.NewResponse(&api.RefreshChannelResponse{
+		SessionCount: sessionCount,
+	}), nil
+}
+
+// taggedEvent wraps a doc or channel event for fan-in multiplexing.
+type taggedEvent struct {
+	docEvent     *events.DocEvent
+	channelEvent *events.ChannelEvent
+	docID        string
+	channelKey   string
+}
+
+// docSub holds a document subscription with its identifiers.
+type docSub struct {
+	docID  types.ID
+	docKey types.DocRefKey
+	sub    *pubsub.DocSubscription
+}
+
+// channelSub holds a channel subscription with its identifiers.
+type channelSub struct {
+	channelKey key.Key
+	refKey     types.ChannelRefKey
+	sub        *pubsub.ChannelSubscription
+}
+
+// Watch connects a unified stream to deliver events from documents and channels
+// to the requesting client.
+func (s *yorkieServer) Watch(
+	ctx context.Context,
+	req *connect.Request[api.WatchRequest],
+	stream *connect.ServerStream[api.WatchResponse],
+) error {
+	clientID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return err
+	}
+
+	project := projects.From(ctx)
+	clientInfo, err := clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(clientID),
+	})
+	if err != nil {
+		return err
+	}
+
+	// Presence peers are keyed by the stable actor stamped into presence
+	// changes. Subscribe under the client-declared actor when present so the
+	// watch peer list and watched/unwatched events align with the presence
+	// CRDT keying; old SDKs omit it and fall back to the session id. The
+	// declared actor must be this authenticated client's own stable actor, so
+	// a client cannot subscribe under another client's presence identity.
+	presenceID := clientID
+	if req.Msg.ActorId != "" {
+		if types.ID(req.Msg.ActorId) != clientInfo.StableActorID {
+			return clients.ErrActorMismatch
+		}
+		presenceID, err = time.ActorIDFromHex(req.Msg.ActorId)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Resources are resolved to their keys before authorization so the auth
+	// webhook can be asked about the documents and channels this stream would
+	// deliver. The request carries document ids, and only the key identifies a
+	// document to a webhook, so a deployment authorizing per document cannot
+	// decide anything until the ids are resolved.
+	targets, err := s.resolveResources(ctx, req.Msg, project)
+	if err != nil {
+		return err
+	}
+
+	keys := make([]key.Key, len(targets))
+	for i, target := range targets {
+		keys[i] = target.key()
+	}
+	streamCtx, release, err := s.admitWatch(ctx, &types.AccessInfo{
+		Method:     types.Watch,
+		Attributes: types.NewAccessAttributes(keys, types.Read),
+	})
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	docSubs, channelSubs, resourceInits, err := s.subscribeResources(ctx, targets, presenceID, project)
+	if err != nil {
+		return err
+	}
+
+	s.backend.Metrics.AddWatchDocumentConnections(s.backend.Config.Hostname, project)
+	defer func() {
+		for _, ds := range docSubs {
+			if err := s.unwatchDoc(ctx, ds.sub, ds.docKey); err != nil {
+				logging.From(ctx).Error(err)
+			}
+		}
+		for _, cs := range channelSubs {
+			s.backend.PubSub.UnsubscribeChannel(ctx, cs.refKey, cs.sub)
+		}
+		s.backend.Metrics.RemoveWatchDocumentConnections(s.backend.Config.Hostname, project)
+	}()
+
+	if err := context.Cause(streamCtx); err != nil {
+		return err
+	}
+	heartbeatInterval := s.resolveHeartbeatInterval(req.Msg.HeartbeatIntervalMs)
+	if err := s.sendWatchInitialization(stream.Send, resourceInits, heartbeatInterval); err != nil {
+		return err
+	}
+
+	return s.streamMergedEvents(streamCtx, stream.Send, project, docSubs, channelSubs, heartbeatInterval)
+}
+
+// sendWatchInitialization sends the first response of a Watch stream.
+//
+// The effective heartbeat interval -- what the client asked for, clamped to
+// this server's bounds -- is advertised before the first heartbeat is due, so
+// a client knows what to expect from the moment the stream comes up and can
+// size its idle timeout against the value the server settled on rather than
+// the one it requested. A stream that asked for no heartbeats, or a server
+// with them disabled, advertises 0, which tells the client not to apply an
+// idle timeout at all.
+func (s *yorkieServer) sendWatchInitialization(
+	send func(*api.WatchResponse) error,
+	resourceInits []*api.ResourceInit,
+	heartbeatInterval gotime.Duration,
+) error {
+	return send(&api.WatchResponse{
+		Body: &api.WatchResponse_Initialization{
+			Initialization: &api.WatchInitialization{
+				ResourceInits:       resourceInits,
+				HeartbeatIntervalMs: heartbeatInterval.Milliseconds(),
+			},
+		},
+	})
+}
+
+// admitWatch admits a Watch stream: it registers the stream for later
+// revalidation, then verifies the access as any other RPC does. The stream
+// must be served under the returned context, which ends with the
+// revalidation error if a later RevalidateAccess closes it, and release must
+// be called when the stream ends.
+//
+// Registering before verifying closes a gap: a revalidation that runs after
+// registration finds the stream, and one that ran before it dropped the
+// cached decisions this admission now reads.
+func (s *yorkieServer) admitWatch(
+	ctx context.Context,
+	access *types.AccessInfo,
+) (context.Context, func(), error) {
+	streamCtx, stream := s.watches.register(
+		ctx,
+		projects.From(ctx).ID,
+		metadata.From(ctx).Authorization,
+		*access,
+	)
+	release := func() { s.watches.release(stream) }
+	if err := auth.VerifyAccess(ctx, s.backend, access); err != nil {
+		release()
+		return nil, nil, err
+	}
+	stream.admitted.Store(true)
+
+	return streamCtx, release, nil
+}
+
+// watchTarget is a Watch resource descriptor resolved to what the rest of the
+// handler needs: the key authorization is decided on, and the identifiers the
+// subscribe step consumes. Exactly one of docInfo and channelKey is set.
+type watchTarget struct {
+	docInfo    *database.DocInfo
+	channelKey key.Key
+}
+
+// key returns the resource key the auth webhook is asked about.
+func (t watchTarget) key() key.Key {
+	if t.docInfo != nil {
+		return t.docInfo.Key
+	}
+	return t.channelKey
+}
+
+// resolveResources validates the resource descriptors of the request and
+// resolves each to its target. Every descriptor must resolve, so on success
+// the returned slice holds at least one target: a stream with no subscription
+// ends as soon as it starts (see streamMergedEvents), which a client reads as
+// an unexpected termination rather than as a rejection.
+func (s *yorkieServer) resolveResources(
+	ctx context.Context,
+	req *api.WatchRequest,
+	project *types.Project,
+) ([]watchTarget, error) {
+	if len(req.Resources) == 0 {
+		return nil, ErrNoResources
+	}
+	if len(req.Resources) > maxWatchResources {
+		return nil, ErrTooManyResources
+	}
+
+	// Descriptors are checked for shape before any of them is resolved, so a
+	// request this server cannot serve in full is rejected without spending a
+	// database read on its well-formed siblings.
+	for _, res := range req.Resources {
+		if res == nil {
+			return nil, ErrUnsupportedResource
+		}
+		switch res.Resource.(type) {
+		case *api.ResourceDescriptor_Document, *api.ResourceDescriptor_Channel:
+		default:
+			return nil, ErrUnsupportedResource
+		}
+	}
+
+	targets := make([]watchTarget, 0, len(req.Resources))
+	for _, res := range req.Resources {
+		var target watchTarget
+		var err error
+
+		switch desc := res.Resource.(type) {
+		case *api.ResourceDescriptor_Document:
+			target, err = s.resolveDocument(ctx, desc.Document.DocumentId, project)
+		case *api.ResourceDescriptor_Channel:
+			target, err = resolveChannel(desc.Channel.ChannelKey)
+		}
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+
+	return targets, nil
+}
+
+// resolveDocument resolves a document id to the target the auth webhook is
+// asked about and the subscribe step consumes.
+func (s *yorkieServer) resolveDocument(
+	ctx context.Context,
+	documentID string,
+	project *types.Project,
+) (watchTarget, error) {
+	docID, err := converter.FromDocumentID(documentID)
+	if err != nil {
+		return watchTarget{}, err
+	}
+
+	docInfo, err := documents.FindDocInfoByRefKey(ctx, s.backend, types.DocRefKey{
+		ProjectID: project.ID,
+		DocID:     docID,
+	})
+	if err != nil {
+		return watchTarget{}, err
+	}
+
+	return watchTarget{docInfo: docInfo}, nil
+}
+
+// resolveChannel validates a channel key and returns it as a target.
+func resolveChannel(channelKey string) (watchTarget, error) {
+	k := key.Key(channelKey)
+	if err := k.Validate(); err != nil {
+		return watchTarget{}, err
+	}
+
+	return watchTarget{channelKey: k}, nil
+}
+
+// subscribeResources subscribes to each resolved target and returns the
+// subscriptions together with the init data the stream opens with.
+func (s *yorkieServer) subscribeResources(
+	ctx context.Context,
+	targets []watchTarget,
+	clientID time.ActorID,
+	project *types.Project,
+) ([]docSub, []channelSub, []*api.ResourceInit, error) {
+	var docSubs []docSub
+	var channelSubs []channelSub
+	var resourceInits []*api.ResourceInit
+
+	cleanup := func() {
+		for _, ds := range docSubs {
+			if err := s.unwatchDoc(ctx, ds.sub, ds.docKey); err != nil {
+				logging.From(ctx).Error(err)
+			}
+		}
+		for _, cs := range channelSubs {
+			s.backend.PubSub.UnsubscribeChannel(ctx, cs.refKey, cs.sub)
+		}
+	}
+
+	for _, target := range targets {
+		if target.docInfo != nil {
+			ds, ri, err := s.subscribeDocument(ctx, target, clientID, project)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, err
+			}
+			docSubs = append(docSubs, *ds)
+			resourceInits = append(resourceInits, ri)
+			continue
+		}
+
+		cs, ri, err := s.subscribeChannel(ctx, target.channelKey, clientID, project)
+		if err != nil {
+			cleanup()
+			return nil, nil, nil, err
+		}
+		channelSubs = append(channelSubs, *cs)
+		resourceInits = append(resourceInits, ri)
+	}
+
+	return docSubs, channelSubs, resourceInits, nil
+}
+
+// subscribeDocument subscribes to a single document and returns its subscription and init data.
+func (s *yorkieServer) subscribeDocument(
+	ctx context.Context,
+	target watchTarget,
+	clientID time.ActorID,
+	project *types.Project,
+) (*docSub, *api.ResourceInit, error) {
+	docInfo := target.docInfo
+	dk := types.DocRefKey{ProjectID: project.ID, DocID: docInfo.ID}
+
+	locker := s.backend.Lockers.Locker(documents.DocWatchStreamKey(clientID, docInfo.Key))
+	defer locker.Unlock()
+
+	sub, clientIDs, err := s.watchDoc(ctx, clientID, dk, project.MaxSubscribersPerDocument)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var pbClientIDs []string
+	for _, id := range clientIDs {
+		pbClientIDs = append(pbClientIDs, id.String())
+	}
+
+	return &docSub{docID: docInfo.ID, docKey: dk, sub: sub}, &api.ResourceInit{
+		Init: &api.ResourceInit_DocumentInit{
+			DocumentInit: &api.DocumentInit{
+				DocumentId: docInfo.ID.String(),
+				ClientIds:  pbClientIDs,
+			},
+		},
+	}, nil
+}
+
+// subscribeChannel subscribes to a single channel and returns its subscription and init data.
+func (s *yorkieServer) subscribeChannel(
+	ctx context.Context,
+	channelKey key.Key,
+	clientID time.ActorID,
+	project *types.Project,
+) (*channelSub, *api.ResourceInit, error) {
+	refKey := types.ChannelRefKey{
+		ProjectID:  project.ID,
+		ChannelKey: channelKey,
+	}
+	sub, _, err := s.backend.PubSub.SubscribeChannel(ctx, clientID, refKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sessionCount := s.backend.Channel.SessionCount(refKey, false)
+	return &channelSub{channelKey: channelKey, refKey: refKey, sub: sub}, &api.ResourceInit{
+		Init: &api.ResourceInit_ChannelInit{
+			ChannelInit: &api.ChannelInit{
+				ChannelKey:   string(channelKey),
+				SessionCount: sessionCount,
+				Seq:          0,
+			},
+		},
+	}, nil
+}
+
+// streamMergedEvents fans in events from all subscriptions and streams them
+// through send. It ends with ErrSubscriptionsClosed once every subscription
+// has closed itself, so the client reconnects instead of treating a stream it
+// never ended as complete.
+//
+// A subscription that closes while others are still live leaves the stream
+// open and that one resource silently undelivered. Streams carry a single
+// resource today, so the two cases coincide; multiplexing several resources
+// onto one stream will have to report the partial loss on its own.
+//
+// While no event arrives for heartbeatInterval, a heartbeat is sent so the
+// client can tell this stream from a half-open one; every sent response
+// restarts that wait, so a busy stream carries no heartbeats. A zero or
+// negative interval sends none.
+func (s *yorkieServer) streamMergedEvents(
+	ctx context.Context,
+	send func(*api.WatchResponse) error,
+	project *types.Project,
+	docSubs []docSub,
+	channelSubs []channelSub,
+	heartbeatInterval gotime.Duration,
+) error {
+	merged := make(chan taggedEvent, len(docSubs)+len(channelSubs))
+	done := make(chan struct{})
+	defer close(done)
+
+	// A subscription closes its own event channel after too many consecutive
+	// publish failures (see pubsub.Subscription.Publish), which makes the
+	// fan-in goroutine below return. Once every fan-in has returned, no event
+	// can reach merged again, so close it to end the stream instead of
+	// leaving the loop below blocked forever.
+	var wg sync.WaitGroup
+	wg.Add(len(docSubs) + len(channelSubs))
+	go func() {
+		wg.Wait()
+		close(merged)
+	}()
+
+	for _, ds := range docSubs {
+		go func(ds docSub) {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				case event, ok := <-ds.sub.Events():
+					if !ok {
+						return
+					}
+					e := event
+					select {
+					case merged <- taggedEvent{docEvent: &e, docID: ds.docID.String()}:
+					case <-done:
+						return
+					}
+				}
+			}
+		}(ds)
+	}
+	for _, cs := range channelSubs {
+		go func(cs channelSub) {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				case event, ok := <-cs.sub.Events():
+					if !ok {
+						return
+					}
+					e := event
+					select {
+					case merged <- taggedEvent{channelEvent: &e, channelKey: string(cs.channelKey)}:
+					case <-done:
+						return
+					}
+				}
+			}
+		}(cs)
+	}
+
+	// A nil channel blocks forever in a select, which is how a disabled
+	// heartbeat drops out of the loop below without a second branch. Since Go
+	// 1.23 a Reset after the timer has fired cannot deliver the stale value,
+	// so re-arming needs no drain.
+	var heartbeats <-chan gotime.Time
+	resetHeartbeat := func() {}
+	if heartbeatInterval > 0 {
+		timer := gotime.NewTimer(heartbeatInterval)
+		defer timer.Stop()
+		heartbeats = timer.C
+		resetHeartbeat = func() { timer.Reset(heartbeatInterval) }
+	}
+
+	for {
+		select {
+		case <-s.serviceCtx.Done():
+			return context.Canceled
+		case <-ctx.Done():
+			return streamEndCause(ctx)
+		case <-heartbeats:
+			if ctx.Err() != nil {
+				return streamEndCause(ctx)
+			}
+			if err := send(&api.WatchResponse{
+				Body: &api.WatchResponse_Heartbeat{Heartbeat: &api.WatchHeartbeat{}},
+			}); err != nil {
+				return err
+			}
+			resetHeartbeat()
+		case te, ok := <-merged:
+			if !ok {
+				return ErrSubscriptionsClosed
+			}
+
+			resp, err := s.convertTaggedEvent(te)
+			if err != nil {
+				logging.From(ctx).Errorf("failed to convert event: %v", err)
+				continue
+			}
+			if resp == nil {
+				continue
+			}
+
+			if te.docEvent != nil {
+				s.backend.Metrics.AddWatchDocumentEventPayloadBytes(
+					s.backend.Config.Hostname,
+					project,
+					te.docEvent.Type,
+					te.docEvent.Body.PayloadLen(),
+				)
+			}
+
+			// select picks among ready cases at random, so an event can win
+			// over a closed context: check again before delivering it.
+			if ctx.Err() != nil {
+				return streamEndCause(ctx)
+			}
+			if err := send(resp); err != nil {
+				return err
+			}
+			resetHeartbeat()
+		}
+	}
+}
+
+// convertTaggedEvent converts a tagged event into a WatchResponse.
+// Returns nil response for events that should be skipped.
+func (s *yorkieServer) convertTaggedEvent(te taggedEvent) (*api.WatchResponse, error) {
+	if te.docEvent != nil {
+		eventType, err := converter.ToDocEventType(te.docEvent.Type)
+		if err != nil {
+			return nil, err
+		}
+		return &api.WatchResponse{
+			Body: &api.WatchResponse_Event{
+				Event: &api.WatchEvent{
+					Event: &api.WatchEvent_DocEvent{
+						DocEvent: &api.DocWatchEvent{
+							DocumentId: te.docID,
+							Event: &api.DocEvent{
+								Type:      eventType,
+								Publisher: te.docEvent.Actor.String(),
+								Body: &api.DocEventBody{
+									Topic:   te.docEvent.Body.Topic,
+									Payload: te.docEvent.Body.Payload,
+								},
+							},
+						},
+					},
+				},
+			},
+		}, nil
+	}
+
+	if te.channelEvent != nil {
+		return convertChannelEvent(te.channelKey, te.channelEvent)
+	}
+
+	return nil, nil
+}
+
+// convertChannelEvent converts a channel event into a WatchResponse.
+func convertChannelEvent(channelKey string, event *events.ChannelEvent) (*api.WatchResponse, error) {
+	if event.Type == events.ChannelBroadcast {
+		return &api.WatchResponse{
+			Body: &api.WatchResponse_Event{
+				Event: &api.WatchEvent{
+					Event: &api.WatchEvent_ChannelEvent{
+						ChannelEvent: &api.ChannelWatchEvent{
+							ChannelKey: channelKey,
+							Event: &api.ChannelEvent{
+								Type:      api.ChannelEvent_TYPE_BROADCAST,
+								Publisher: event.Publisher.String(),
+								Topic:     event.Topic,
+								Payload:   event.Payload,
+							},
+						},
+					},
+				},
+			},
+		}, nil
+	}
+
+	if event.Seq > 0 {
+		return &api.WatchResponse{
+			Body: &api.WatchResponse_Event{
+				Event: &api.WatchEvent{
+					Event: &api.WatchEvent_ChannelEvent{
+						ChannelEvent: &api.ChannelWatchEvent{
+							ChannelKey: channelKey,
+							Event: &api.ChannelEvent{
+								Type:         api.ChannelEvent_TYPE_PRESENCE,
+								SessionCount: event.SessionCount,
+								Seq:          event.Seq,
+							},
+						},
+					},
+				},
+			},
+		}, nil
+	}
+
+	// Skip initial event with Seq 0
+	return nil, nil
+}
+
+// WatchDocument is a deprecated shim that delegates to subscribeDocument and streamEvents.
+// Deprecated: Use Watch with ResourceDescriptor instead.
+func (s *yorkieServer) WatchDocument(
+	ctx context.Context,
+	req *connect.Request[api.WatchDocumentRequest],
+	stream *connect.ServerStream[api.WatchDocumentResponse],
+) error {
+	clientID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return err
+	}
+
+	project := projects.From(ctx)
+	if _, err = clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(clientID),
+	}); err != nil {
+		return err
+	}
+
+	// Resolved before authorization for the same reason as in Watch: the
+	// webhook decides on the document key, which only the resolved target
+	// carries.
+	target, err := s.resolveDocument(ctx, req.Msg.DocumentId, project)
+	if err != nil {
+		return err
+	}
+
+	streamCtx, release, err := s.admitWatch(ctx, &types.AccessInfo{
+		Method:     types.WatchDocument,
+		Attributes: types.NewAccessAttributes([]key.Key{target.key()}, types.Read),
+	})
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	ds, ri, err := s.subscribeDocument(ctx, target, clientID, project)
+	if err != nil {
+		return err
+	}
+
+	s.backend.Metrics.AddWatchDocumentConnections(s.backend.Config.Hostname, project)
+	defer func() {
+		if err := s.unwatchDoc(ctx, ds.sub, ds.docKey); err != nil {
+			logging.From(ctx).Error(err)
+		}
+		s.backend.Metrics.RemoveWatchDocumentConnections(s.backend.Config.Hostname, project)
+	}()
+
+	if err := context.Cause(streamCtx); err != nil {
+		return err
+	}
+	docInit := ri.GetDocumentInit()
+	if err := stream.Send(&api.WatchDocumentResponse{
+		Body: &api.WatchDocumentResponse_Initialization_{
+			Initialization: &api.WatchDocumentResponse_Initialization{
+				ClientIds: docInit.GetClientIds(),
+			},
+		},
+	}); err != nil {
+		return err
+	}
+
+	return streamEvents(
+		streamCtx,
+		s.serviceCtx,
+		ds.sub,
+		stream.Send,
+		func(event events.DocEvent) (*api.WatchDocumentResponse, error) {
+			eventType, err := converter.ToDocEventType(event.Type)
+			if err != nil {
+				return nil, err
+			}
+			return &api.WatchDocumentResponse{
+				Body: &api.WatchDocumentResponse_Event{
+					Event: &api.DocEvent{
+						Type:      eventType,
+						Publisher: event.Actor.String(),
+						Body: &api.DocEventBody{
+							Topic:   event.Body.Topic,
+							Payload: event.Body.Payload,
+						},
+					},
+				},
+			}, nil
+		},
+		func(event events.DocEvent) {
+			s.backend.Metrics.AddWatchDocumentEventPayloadBytes(
+				s.backend.Config.Hostname,
+				project,
+				event.Type,
+				event.Body.PayloadLen(),
+			)
+		},
+	)
+}
+
+// WatchChannel is a deprecated shim that delegates to subscribeChannel and streamEvents.
+// Deprecated: Use Watch with ResourceDescriptor instead.
+func (s *yorkieServer) WatchChannel(
+	ctx context.Context,
+	req *connect.Request[api.WatchChannelRequest],
+	stream *connect.ServerStream[api.WatchChannelResponse],
+) error {
+	clientID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return err
+	}
+
+	channelKey := key.Key(req.Msg.ChannelKey)
+	if err := channelKey.Validate(); err != nil {
+		return err
+	}
+
+	project := projects.From(ctx)
+	if _, err = clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(clientID),
+	}); err != nil {
+		return err
+	}
+
+	target, err := resolveChannel(req.Msg.ChannelKey)
+	if err != nil {
+		return err
+	}
+
+	streamCtx, release, err := s.admitWatch(ctx, &types.AccessInfo{
+		Method:     types.WatchChannel,
+		Attributes: types.NewAccessAttributes([]key.Key{target.key()}, types.Read),
+	})
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	cs, ri, err := s.subscribeChannel(ctx, target.channelKey, clientID, project)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		s.backend.PubSub.UnsubscribeChannel(ctx, cs.refKey, cs.sub)
+	}()
+
+	if err := context.Cause(streamCtx); err != nil {
+		return err
+	}
+	chInit := ri.GetChannelInit()
+	if err := stream.Send(&api.WatchChannelResponse{
+		Body: &api.WatchChannelResponse_Initialized{
+			Initialized: &api.WatchChannelInitialized{
+				SessionCount: chInit.GetSessionCount(),
+				Seq:          chInit.GetSeq(),
+			},
+		},
+	}); err != nil {
+		return err
+	}
+
+	return streamEvents(
+		streamCtx,
+		s.serviceCtx,
+		cs.sub,
+		stream.Send,
+		func(event events.ChannelEvent) (*api.WatchChannelResponse, error) {
+			if event.Type == events.ChannelBroadcast {
+				return &api.WatchChannelResponse{
+					Body: &api.WatchChannelResponse_Event{
+						Event: &api.ChannelEvent{
+							Type:      api.ChannelEvent_TYPE_BROADCAST,
+							Publisher: event.Publisher.String(),
+							Topic:     event.Topic,
+							Payload:   event.Payload,
+						},
+					},
+				}, nil
+			}
+			if event.Seq > 0 {
+				return &api.WatchChannelResponse{
+					Body: &api.WatchChannelResponse_Event{
+						Event: &api.ChannelEvent{
+							Type:         api.ChannelEvent_TYPE_PRESENCE,
+							SessionCount: event.SessionCount,
+							Seq:          event.Seq,
+						},
+					},
+				}, nil
+			}
+			// Skip initial event with Seq 0
+			return nil, nil
+		},
+		nil,
+	)
+}
+
+// PeekChannel returns the current session_count of a channel without
+// creating a session on the server. Use when the caller only needs to
+// display the count and does not need to receive broadcasts or contribute
+// to the count itself. Polled by the client at its own cadence; no
+// per-caller server state, no pubsub fan-out.
+func (s *yorkieServer) PeekChannel(
+	ctx context.Context,
+	req *connect.Request[api.PeekChannelRequest],
+) (*connect.Response[api.PeekChannelResponse], error) {
+	channelKey := key.Key(req.Msg.ChannelKey)
+	if err := channelKey.Validate(); err != nil {
+		return nil, err
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.PeekChannel,
+		Attributes: types.NewAccessAttributes([]key.Key{channelKey}, types.Read),
+	}); err != nil {
+		return nil, err
+	}
+
+	refKey := types.ChannelRefKey{
+		ProjectID:  projects.From(ctx).ID,
+		ChannelKey: channelKey,
+	}
+	return connect.NewResponse(&api.PeekChannelResponse{
+		SessionCount: s.backend.Channel.SessionCount(refKey, false),
+	}), nil
+}
+
+// Broadcast broadcasts a message to all clients watching the presence.
+func (s *yorkieServer) Broadcast(
+	ctx context.Context,
+	req *connect.Request[api.BroadcastRequest],
+) (*connect.Response[api.BroadcastResponse], error) {
+	// 01. Validate the request
+	actorID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	channelKey := key.Key(req.Msg.ChannelKey)
+	if err := channelKey.Validate(); err != nil {
+		return nil, err
+	}
+
+	// 02. Verify access
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.Broadcast,
+		Attributes: types.NewAccessAttributes([]key.Key{channelKey}, types.Read),
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+
+	// 03. Verify active client
+	if _, err = clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(actorID),
+	}); err != nil {
+		return nil, err
+	}
+
+	// 04. Publish broadcast event
+	refKey := types.ChannelRefKey{
+		ProjectID:  project.ID,
+		ChannelKey: channelKey,
+	}
+
+	s.backend.PubSub.PublishChannel(ctx, events.ChannelEvent{
+		Type:      events.ChannelBroadcast,
+		Key:       refKey,
+		Publisher: actorID,
+		Topic:     req.Msg.Topic,
+		Payload:   req.Msg.Payload,
+	})
+
+	return connect.NewResponse(&api.BroadcastResponse{}), nil
+}
+
+// verifyDocCreation asks the webhook for a document write when the attach
+// would create the document.
+//
+// Creating the document is a write the pack does not show, and it fixates the
+// document's disable_presence for every attach that follows: the attach that
+// inserts the row decides whether the document carries presence at all. An
+// attach whose pack is empty or presence only is approved without a document
+// write, so a webhook that allows those would let any member create documents
+// and pick that flag. The probe reads the document under the predicate
+// FindOrCreateDocInfo inserts on — the project's key, not removed — so a
+// document not found here is one that call creates.
+//
+// The probe costs a read, so it is skipped for an attach already approved as
+// a document write, and when the project does not ask the webhook about
+// attaches: there is no one to ask, and VerifyAccess would return without a
+// call.
+func (s *yorkieServer) verifyDocCreation(
+	ctx context.Context,
+	project *types.Project,
+	attrs []types.AccessAttribute,
+	docKey key.Key,
+) error {
+	if auth.WritesDocument(attrs) || !project.RequireAuth(types.AttachDocument) {
+		return nil
+	}
+
+	if _, err := documents.FindDocInfoByKey(ctx, s.backend, project, docKey); err != nil {
+		if !stderrors.Is(err, database.ErrDocumentNotFound) {
+			return err
+		}
+
+		return auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+			Method:     types.AttachDocument,
+			Attributes: types.NewAccessAttributes([]key.Key{docKey}, types.ReadWrite),
+		})
+	}
+
+	return nil
+}
+
+// canRebindSchema reports whether an attach that finds no client attached
+// rebinds the document's schema to the one the request names.
+//
+// Rebinding writes the document, which the pack does not show: an attach
+// whose pack is empty (a presence-disabled document) or presence only was
+// approved without a document write, and a webhook that allows those would
+// let any member pick the schema later edits are checked against, or drop the
+// binding by asking for none. Such an attach never rebinds without asking.
+// bound was read before the attachment lock was taken, so the persisted
+// binding may have changed since; instead of comparing against it and then
+// writing over a binding it never saw, the attach writes nothing when it names
+// no schema or the schema it read, and is asked for the write before anything
+// else, the schema lookup included, otherwise.
+func (s *yorkieServer) canRebindSchema(
+	ctx context.Context,
+	attrs []types.AccessAttribute,
+	docKey key.Key,
+	requested string,
+	bound string,
+) (bool, error) {
+	if auth.WritesDocument(attrs) {
+		return true, nil
+	}
+	if requested == "" || requested == bound {
+		return false, nil
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.AttachDocument,
+		Attributes: types.NewAccessAttributes([]key.Key{docKey}, types.ReadWrite),
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// DetachDocument detaches the given document to the client.
+func (s *yorkieServer) DetachDocument(
+	ctx context.Context,
+	req *connect.Request[api.DetachDocumentRequest],
+) (*connect.Response[api.DetachDocumentResponse], error) {
+	// 01. Validate the request and verify access
+	actorID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	pack, err := fromChangePack(req.Msg.ChangePack, false)
+	if err != nil {
+		return nil, err
+	}
+	docID, err := converter.FromDocumentID(req.Msg.DocumentId)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.DetachDocument,
+		Attributes: auth.AccessAttributes(pack),
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+
+	docLocker := s.backend.Lockers.LockerWithRLock(packs.DocKey(project.ID, pack.DocumentKey))
+	defer docLocker.RUnlock()
+	locker := s.backend.Lockers.Locker(packs.DocPullKey(actorID, pack.DocumentKey))
+	defer locker.Unlock()
+
+	clientInfo, err := clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(actorID),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 02. Set the document status if it is not attached.
+	docKey := types.DocRefKey{ProjectID: project.ID, DocID: docID}
+	if project.HasAttachmentLimit() || project.RemoveOnDetach {
+		locker := s.backend.Lockers.Locker(documents.DocAttachmentKey(docKey))
+		defer locker.Unlock()
+	}
+
+	// NOTE(hackerwins): If the project does not have an attachment limit,
+	// removing the document by RemoveOnDetach does not guarantee that
+	// the document is not attached to the client.
+	var status = document.StatusDetached
+	if project.RemoveOnDetach {
+		isAttached, err := documents.IsDocumentAttachedOrAttaching(ctx, s.backend, docKey, clientInfo.ID)
+		if err != nil {
+			return nil, err
+		}
+
+		if !isAttached {
+			pack.IsRemoved = true
+			status = document.StatusRemoved
+		}
+	}
+
+	// 03. Read the document's disable_presence so PushPull can enforce it on
+	// the detach path as well. FindDocInfoByRefKey hits the LRU cache for
+	// warm docs.
+	docInfo, err := documents.FindDocInfoByRefKey(ctx, s.backend, docKey)
+	if err != nil {
+		return nil, err
+	}
+	if docInfo.Key != pack.DocumentKey {
+		return nil, ErrDocumentKeyMismatch
+	}
+
+	// 04. Push/Pull between the client and server.
+	pulled, err := packs.PushPull(ctx, s.backend, project, clientInfo, docKey, pack, packs.PushPullOptions{
+		Mode:            types.SyncModePushPull,
+		Status:          status,
+		DisablePresence: docInfo.DisablePresence,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 05. Drop the client row every node has cached. A detach is routed to the
+	// document's owner node, which refreshes its own entry as it writes; every
+	// other node keeps a copy that still says attached, and nothing else would
+	// ever correct it.
+	//
+	// This sits directly after the write that detached the client, not after
+	// the response is built: the row MongoDB holds has already moved on, so
+	// any step failing in between must not leave the peers' copies behind.
+	clients.InvalidateCachedClient(ctx, s.backend, clientInfo.RefKey())
+
+	pbChangePack, err := pulled.ToPBChangePack()
+	if err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&api.DetachDocumentResponse{
+		ChangePack: pbChangePack,
+	}), nil
+}
+
+// PushPullChanges stores the changes sent by the client and delivers the changes
+// accumulated in the server to the client.
+func (s *yorkieServer) PushPullChanges(
+	ctx context.Context,
+	req *connect.Request[api.PushPullChangesRequest],
+) (*connect.Response[api.PushPullChangesResponse], error) {
+	// 01. Validate the request and verify access
+	actorID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	pack, err := fromChangePack(req.Msg.ChangePack, false)
+	if err != nil {
+		return nil, err
+	}
+	docID, err := converter.FromDocumentID(req.Msg.DocumentId)
+	if err != nil {
+		return nil, err
+	}
+	syncMode := types.SyncModePushPull
+	if req.Msg.PushOnly {
+		syncMode = types.SyncModePushOnly
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.PushPull,
+		Attributes: auth.AccessAttributes(pack),
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+
+	docLocker := s.backend.Lockers.LockerWithRLock(packs.DocKey(project.ID, pack.DocumentKey))
+	defer docLocker.RUnlock()
+	locker := s.backend.Lockers.Locker(packs.DocPullKey(actorID, pack.DocumentKey))
+	defer locker.Unlock()
+	clientInfo, err := clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(actorID),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 02. Ensure the document attached to the client.
+	if err := clientInfo.EnsureDocumentAttached(docID); err != nil {
+		return nil, err
+	}
+
+	// 03. Read the document's disable_presence option so PushPull can
+	// enforce it. FindDocInfoByRefKey hits the LRU cache for warm docs.
+	docKey := types.DocRefKey{ProjectID: project.ID, DocID: docID}
+	docInfo, err := documents.FindDocInfoByRefKey(ctx, s.backend, docKey)
+	if err != nil {
+		return nil, err
+	}
+	if docInfo.Key != pack.DocumentKey {
+		return nil, ErrDocumentKeyMismatch
+	}
+
+	// 04. Push/Pull between the client and server.
+	pulled, err := packs.PushPull(ctx, s.backend, project, clientInfo, docKey, pack, packs.PushPullOptions{
+		Mode:            syncMode,
+		Status:          document.StatusAttached,
+		DisableGC:       req.Msg.DisableGc,
+		DisablePresence: docInfo.DisablePresence,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	pbChangePack, err := pulled.ToPBChangePack()
+	if err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&api.PushPullChangesResponse{
+		ChangePack: pbChangePack,
+	}), nil
+}
+
+// fromChangePack decodes the change pack of a request and sets its IsRemoved
+// by the method instead of taking the client's flag: removes says whether the
+// method removes the document, which only RemoveDocument does. Taking the
+// flag as sent would let any pack method remove the document, past a webhook
+// that gates only RemoveDocument, and would let a RemoveDocument without it be
+// asked as a read while it still removes. A server-side removal, such as
+// RemoveOnDetach, sets the flag later, after the webhook has been asked.
+func fromChangePack(pbPack *api.ChangePack, removes bool) (*change.Pack, error) {
+	pack, err := converter.FromChangePack(pbPack)
+	if err != nil {
+		return nil, err
+	}
+	pack.IsRemoved = removes
+	return pack, nil
+}
+
+// RemoveDocument removes the given document.
+func (s *yorkieServer) RemoveDocument(
+	ctx context.Context,
+	req *connect.Request[api.RemoveDocumentRequest],
+) (*connect.Response[api.RemoveDocumentResponse], error) {
+	// 01. Validate the request and verify access
+	actorID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	pack, err := fromChangePack(req.Msg.ChangePack, true)
+	if err != nil {
+		return nil, err
+	}
+	docID, err := converter.FromDocumentID(req.Msg.DocumentId)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.RemoveDocument,
+		Attributes: auth.AccessAttributes(pack),
+	}); err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+
+	docLocker := s.backend.Lockers.LockerWithRLock(packs.DocKey(project.ID, pack.DocumentKey))
+	defer docLocker.RUnlock()
+	locker := s.backend.Lockers.Locker(packs.DocPullKey(actorID, pack.DocumentKey))
+	defer locker.Unlock()
+	clientInfo, err := clients.FindActiveClientInfo(ctx, s.backend, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(actorID),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	docKey := types.DocRefKey{ProjectID: project.ID, DocID: docID}
+	if project.HasAttachmentLimit() {
+		locker := s.backend.Lockers.Locker(documents.DocAttachmentKey(docKey))
+		defer locker.Unlock()
+	}
+
+	// 02. Read the document's disable_presence so PushPull can enforce it on
+	// the remove path as well.
+	docInfo, err := documents.FindDocInfoByRefKey(ctx, s.backend, docKey)
+	if err != nil {
+		return nil, err
+	}
+	if docInfo.Key != pack.DocumentKey {
+		return nil, ErrDocumentKeyMismatch
+	}
+
+	// 03. Push/Pull between the client and server.
+	pulled, err := packs.PushPull(ctx, s.backend, project, clientInfo, docKey, pack, packs.PushPullOptions{
+		Mode:            types.SyncModePushPull,
+		Status:          document.StatusRemoved,
+		DisablePresence: docInfo.DisablePresence,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 04. Removing the document detaches the client from it, so the same
+	// cached-row correction the detach path needs applies here, and for the
+	// same reason it sits directly after the write rather than after the
+	// response is built.
+	clients.InvalidateCachedClient(ctx, s.backend, clientInfo.RefKey())
+
+	pbChangePack, err := pulled.ToPBChangePack()
+	if err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&api.RemoveDocumentResponse{
+		ChangePack: pbChangePack,
+	}), nil
+}
+
+// CreateRevision creates a new revision for the given document.
+func (s *yorkieServer) CreateRevision(
+	ctx context.Context,
+	req *connect.Request[api.CreateRevisionRequest],
+) (*connect.Response[api.CreateRevisionResponse], error) {
+	clientID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	docID, err := converter.FromDocumentID(req.Msg.DocumentId)
+	if err != nil {
+		return nil, err
+	}
+
+	project := projects.From(ctx)
+	docKey := types.DocRefKey{
+		ProjectID: project.ID,
+		DocID:     docID,
+	}
+	docInfo, err := documents.FindDocInfoByRefKey(ctx, s.backend, docKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// The response carries the snapshot this call builds, so it reads the
+	// document as much as it writes one: it is gated like its siblings, with
+	// the document's key as the attribute the webhook decides on.
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.CreateRevision,
+		Attributes: types.NewAccessAttributes([]key.Key{docInfo.Key}, types.ReadWrite),
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := confirmAttachedClient(ctx, s.backend, project, clientID, docID); err != nil {
+		return nil, err
+	}
+
+	revision, err := revisions.Create(
+		ctx,
+		s.backend,
+		docKey,
+		req.Msg.Label,
+		req.Msg.Description,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&api.CreateRevisionResponse{
+		Revision: converter.ToRevisionSummary(revision),
+	}), nil
+}
+
+// confirmAttachedClient confirms against MongoDB, bypassing this node's client
+// cache, that the client is activated and holds the document attached, or is
+// in the middle of attaching it.
+//
+// The revision RPCs read and overwrite a whole document, and auth.VerifyAccess
+// is a no-op unless the project configures an auth webhook, so the client row
+// is the only thing standing between a request and another client's document.
+// A cached row is not enough for that: it is replaced only by a write this
+// node performed, so a detach or a deactivation another node wrote is
+// invisible to it. Unlike push/pull these calls are not per-sync, so the one
+// read they cost is worth paying.
+//
+// Attaching counts as holding the document, as it does on the detach and
+// remove paths: the row is written before the attach completes, and the
+// client that wrote it is the one asking here. Requiring Attached instead
+// would reject a client mid-attach, which this gate never meant to do.
+func confirmAttachedClient(
+	ctx context.Context,
+	be *backend.Backend,
+	project *types.Project,
+	clientID time.ActorID,
+	docID types.ID,
+) error {
+	clientInfo, err := clients.FindActiveClientInfo(ctx, be, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(clientID),
+	}, true)
+	if err != nil {
+		return err
+	}
+
+	return clientInfo.EnsureDocumentAttachedOrAttaching(docID)
+}
+
+// ListRevisions returns all revisions for the given document.
+func (s *yorkieServer) ListRevisions(
+	ctx context.Context,
+	req *connect.Request[api.ListRevisionsRequest],
+) (*connect.Response[api.ListRevisionsResponse], error) {
+	clientID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	docID, err := converter.FromDocumentID(req.Msg.DocumentId)
+	if err != nil {
+		return nil, err
+	}
+
+	paging := types.Paging[int]{
+		Offset:    int(req.Msg.Offset),
+		PageSize:  int(req.Msg.PageSize),
+		IsForward: req.Msg.IsForward,
+	}
+
+	project := projects.From(ctx)
+	docKey := types.DocRefKey{ProjectID: project.ID, DocID: docID}
+	docInfo, err := documents.FindDocInfoByRefKey(ctx, s.backend, docKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.ListRevisions,
+		Attributes: types.NewAccessAttributes([]key.Key{docInfo.Key}, types.Read),
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := confirmAttachedClient(ctx, s.backend, project, clientID, docID); err != nil {
+		return nil, err
+	}
+
+	summaries, err := revisions.List(ctx, s.backend, docKey, paging, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&api.ListRevisionsResponse{
+		Revisions: converter.ToRevisionSummaries(summaries),
+	}), nil
+}
+
+// GetRevision returns a specific revision with its full snapshot data.
+func (s *yorkieServer) GetRevision(
+	ctx context.Context,
+	req *connect.Request[api.GetRevisionRequest],
+) (*connect.Response[api.GetRevisionResponse], error) {
+	clientID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	docID, err := converter.FromDocumentID(req.Msg.DocumentId)
+	if err != nil {
+		return nil, err
+	}
+
+	revisionID := types.ID(req.Msg.RevisionId)
+	project := projects.From(ctx)
+	docKey := types.DocRefKey{ProjectID: project.ID, DocID: docID}
+	docInfo, err := documents.FindDocInfoByRefKey(ctx, s.backend, docKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.GetRevision,
+		Attributes: types.NewAccessAttributes([]key.Key{docInfo.Key}, types.Read),
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := confirmAttachedClient(ctx, s.backend, project, clientID, docID); err != nil {
+		return nil, err
+	}
+
+	// Get the revision with full snapshot. The revision ID arrives verbatim
+	// from the request and names a record of its own, so it has to be bound
+	// back to the document this call was authorized against: without that, any
+	// client holding read access to one document could read the snapshot of
+	// any other, in any project.
+	revision, err := revisions.GetForDoc(ctx, s.backend, docKey, revisionID)
+	if err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&api.GetRevisionResponse{
+		Revision: converter.ToRevisionSummary(revision),
+	}), nil
+}
+
+// RestoreRevision restores a document to a specific revision.
+func (s *yorkieServer) RestoreRevision(
+	ctx context.Context,
+	req *connect.Request[api.RestoreRevisionRequest],
+) (*connect.Response[api.RestoreRevisionResponse], error) {
+	clientID, err := time.ActorIDFromHex(req.Msg.ClientId)
+	if err != nil {
+		return nil, err
+	}
+
+	docID, err := converter.FromDocumentID(req.Msg.DocumentId)
+	if err != nil {
+		return nil, err
+	}
+
+	revisionID := types.ID(req.Msg.RevisionId)
+	project := projects.From(ctx)
+	docKey := types.DocRefKey{ProjectID: project.ID, DocID: docID}
+	docInfo, err := documents.FindDocInfoByRefKey(ctx, s.backend, docKey)
+	if err != nil {
+		return nil, err
+	}
+
+	locker := s.backend.Lockers.LockerWithRLock(packs.DocKey(project.ID, docInfo.Key))
+	defer locker.RUnlock()
+
+	if err := auth.VerifyAccess(ctx, s.backend, &types.AccessInfo{
+		Method:     types.RestoreRevision,
+		Attributes: types.NewAccessAttributes([]key.Key{docInfo.Key}, types.ReadWrite),
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := confirmAttachedClient(ctx, s.backend, project, clientID, docID); err != nil {
+		return nil, err
+	}
+
+	// Restore the document this call was authorized against and holds the lock
+	// on, not whichever document the request's revision ID happens to name.
+	if err := revisions.Restore(ctx, s.backend, project, docKey, revisionID); err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&api.RestoreRevisionResponse{}), nil
+}
+
+func (s *yorkieServer) watchDoc(
+	ctx context.Context,
+	clientID time.ActorID,
+	docKey types.DocRefKey,
+	limit int,
+) (*pubsub.DocSubscription, []time.ActorID, error) {
+	sub, clientIDs, err := s.backend.PubSub.Subscribe(ctx, clientID, docKey, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	s.backend.PubSub.Publish(ctx, sub.Subscriber(), events.DocEvent{
+		Type:  events.DocWatched,
+		Actor: sub.Subscriber(),
+		Key:   docKey,
+	})
+	s.backend.Metrics.AddWatchDocumentEventPayloadBytes(
+		s.backend.Config.Hostname,
+		projects.From(ctx),
+		events.DocWatched,
+		0,
+	)
+
+	return sub, clientIDs, nil
+}
+
+func (s *yorkieServer) unwatchDoc(
+	ctx context.Context,
+	sub *pubsub.DocSubscription,
+	docKey types.DocRefKey,
+) error {
+	s.backend.PubSub.Unsubscribe(ctx, docKey, sub)
+	s.backend.PubSub.Publish(ctx, sub.Subscriber(), events.DocEvent{
+		Type:  events.DocUnwatched,
+		Actor: sub.Subscriber(),
+		Key:   docKey,
+	})
+	s.backend.Metrics.AddWatchDocumentEventPayloadBytes(
+		s.backend.Config.Hostname,
+		projects.From(ctx),
+		events.DocUnwatched,
+		0,
+	)
+
+	return nil
+}

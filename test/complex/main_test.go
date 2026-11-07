@@ -1,0 +1,226 @@
+//go:build complex
+
+/*
+ * Copyright 2023 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package complex
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"testing"
+
+	"connectrpc.com/connect"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/yorkie-team/yorkie/admin"
+	"github.com/yorkie-team/yorkie/api/types"
+	"github.com/yorkie-team/yorkie/api/yorkie/v1/v1connect"
+	"github.com/yorkie-team/yorkie/client"
+	"github.com/yorkie-team/yorkie/pkg/document"
+	"github.com/yorkie-team/yorkie/pkg/document/crdt"
+	"github.com/yorkie-team/yorkie/server/backend"
+	"github.com/yorkie-team/yorkie/server/backend/database"
+	"github.com/yorkie-team/yorkie/server/profiling/prometheus"
+	"github.com/yorkie-team/yorkie/server/rpc"
+	"github.com/yorkie-team/yorkie/test/helper"
+)
+
+type testResult struct {
+	flag       bool
+	resultDesc string
+}
+
+type clientAndDocPair struct {
+	cli *client.Client
+	doc *document.Document
+}
+
+var (
+	shardedDBNameForServer   = "test-yorkie-meta-server"
+	testRPCServer            *rpc.Server
+	testRPCAddr              = fmt.Sprintf("localhost:%d", helper.RPCPort)
+	testClient               v1connect.YorkieServiceClient
+	testAdminAuthInterceptor *admin.AuthInterceptor
+	testAdminClient          v1connect.AdminServiceClient
+	testBackend              *backend.Backend
+)
+
+func TestMain(m *testing.M) {
+	// Cleanup the previous data in DB
+	err := helper.CleanUpAllCollections(shardedDBNameForServer)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	met, err := prometheus.NewMetrics()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	mongoConf := helper.TestMongoConfig()
+	mongoConf.YorkieDatabase = shardedDBNameForServer
+	be, err := backend.New(
+		helper.TestBackendConfig(),
+		mongoConf,
+		helper.TestMembershipConfig(),
+		helper.TestHousekeepingConfig(),
+		met, nil, nil,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	testBackend = be
+
+	project, err := be.DB.FindProjectInfoByID(
+		context.Background(),
+		database.DefaultProjectID,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	project, err = be.DB.UpdateProjectInfo(
+		context.Background(),
+		project.ID,
+		&types.UpdatableProjectFields{
+			SnapshotThreshold: &helper.SnapshotThreshold,
+		},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	testRPCServer, err = rpc.NewServer(&rpc.Config{
+		Port:              helper.RPCPort,
+		ReadHeaderTimeout: helper.RPCReadHeaderTimeout,
+		IdleTimeout:       helper.RPCIdleTimeout,
+	}, be)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := testRPCServer.Start(); err != nil {
+		log.Fatalf("failed rpc listen: %s\n", err)
+	}
+
+	authInterceptor := client.NewAuthInterceptor(project.PublicKey, "")
+
+	conn := http.DefaultClient
+	testClient = v1connect.NewYorkieServiceClient(
+		conn,
+		"http://"+testRPCAddr,
+		connect.WithInterceptors(authInterceptor),
+	)
+
+	testAdminAuthInterceptor = admin.NewAuthInterceptor("")
+
+	adminConn := http.DefaultClient
+	testAdminClient = v1connect.NewAdminServiceClient(
+		adminConn,
+		"http://"+testRPCAddr,
+		connect.WithInterceptors(testAdminAuthInterceptor),
+	)
+
+	code := m.Run()
+
+	if err := be.Shutdown(); err != nil {
+		log.Fatal(err)
+	}
+	testRPCServer.Shutdown(true)
+	os.Exit(code)
+}
+
+func syncClientsThenCheckEqual(t *testing.T, pairs []clientAndDocPair) bool {
+	assert.True(t, len(pairs) > 1)
+	ctx := context.Background()
+	// Save own changes and get previous changes.
+	for i, pair := range pairs {
+		fmt.Printf("before d%d: %s\n", i+1, pair.doc.Marshal())
+		err := pair.cli.Sync(ctx)
+		assert.NoError(t, err)
+	}
+
+	// Get last client changes.
+	// Last client get all precede changes in above loop.
+	for _, pair := range pairs[:len(pairs)-1] {
+		err := pair.cli.Sync(ctx)
+		assert.NoError(t, err)
+	}
+
+	// Assert start.
+	expected := pairs[0].doc.Marshal()
+	fmt.Printf("after d1: %s\n", expected)
+	for i, pair := range pairs[1:] {
+		v := pair.doc.Marshal()
+		fmt.Printf("after d%d: %s\n", i+2, v)
+		if expected != v {
+			return false
+		}
+	}
+
+	// Check clone and root tree consistency within each document.
+	for i, pair := range pairs {
+		if !checkCloneAndRootTreeEqual(i+1, pair.doc) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// checkCloneAndRootTreeEqual checks that each tree element in the document
+// has consistent XML between the clone and the root.
+func checkCloneAndRootTreeEqual(docIdx int, doc *document.Document) bool {
+	for key, elem := range doc.RootObject().Members() {
+		tree, ok := elem.(*crdt.Tree)
+		if !ok {
+			continue
+		}
+		rootXML := tree.ToXML()
+		cloneXML := doc.Root().GetTree(key).ToXML()
+		if cloneXML != rootXML {
+			fmt.Printf("d%d: clone/root mismatch for tree %q\n  clone: %s\n  root:  %s\n",
+				docIdx, key, cloneXML, rootXML)
+			return false
+		}
+	}
+	return true
+}
+
+// activeClients creates and activates the given number of clients.
+func activeClients(t *testing.T, n int) (clients []*client.Client) {
+	for range n {
+		c, err := client.Dial(testRPCAddr)
+		assert.NoError(t, err)
+		assert.NoError(t, c.Activate(context.Background()))
+
+		clients = append(clients, c)
+	}
+	return
+}
+
+// deactivateAndCloseClients deactivates and closes the given clients.
+func deactivateAndCloseClients(t *testing.T, clients []*client.Client) {
+	for _, c := range clients {
+		assert.NoError(t, c.Deactivate(context.Background()))
+		assert.NoError(t, c.Close())
+	}
+}

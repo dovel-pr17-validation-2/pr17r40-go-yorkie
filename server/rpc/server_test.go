@@ -1,0 +1,336 @@
+//go:build integration
+
+/*
+ * Copyright 2021 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package rpc_test
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/yorkie-team/yorkie/admin"
+	"github.com/yorkie-team/yorkie/api/yorkie/v1/v1connect"
+	"github.com/yorkie-team/yorkie/client"
+	"github.com/yorkie-team/yorkie/server/backend"
+	"github.com/yorkie-team/yorkie/server/backend/database"
+	"github.com/yorkie-team/yorkie/server/profiling/prometheus"
+	"github.com/yorkie-team/yorkie/server/rpc"
+	"github.com/yorkie-team/yorkie/server/rpc/testcases"
+	"github.com/yorkie-team/yorkie/test/helper"
+)
+
+var (
+	testRPCServer            *rpc.Server
+	testRPCAddr              = fmt.Sprintf("localhost:%d", helper.RPCPort)
+	testClient               v1connect.YorkieServiceClient
+	testAdminAuthInterceptor *admin.AuthInterceptor
+	testAdminClient          v1connect.AdminServiceClient
+	testBackend              *backend.Backend
+)
+
+func TestMain(m *testing.M) {
+	met, err := prometheus.NewMetrics()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	be, err := backend.New(
+		helper.TestBackendConfig(),
+		helper.TestMongoConfig(),
+		helper.TestMembershipConfig(),
+		helper.TestHousekeepingConfig(),
+		met, nil, nil,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	testBackend = be
+
+	project, err := be.DB.FindProjectInfoByID(
+		context.Background(),
+		database.DefaultProjectID,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	testRPCServer, err = rpc.NewServer(&rpc.Config{
+		Port:              helper.RPCPort,
+		ReadHeaderTimeout: helper.RPCReadHeaderTimeout,
+		IdleTimeout:       helper.RPCIdleTimeout,
+	}, be)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err = testRPCServer.Start(); err != nil {
+		log.Fatalf("failed rpc listen: %s\n", err)
+	}
+	if err = helper.WaitForServerToStart(testRPCAddr); err != nil {
+		log.Fatal(err)
+	}
+
+	authInterceptor := client.NewAuthInterceptor(project.PublicKey, "")
+
+	conn := http.DefaultClient
+	testClient = v1connect.NewYorkieServiceClient(
+		conn,
+		"http://"+testRPCAddr,
+		connect.WithInterceptors(authInterceptor),
+	)
+
+	testAdminAuthInterceptor = admin.NewAuthInterceptor("")
+
+	adminConn := http.DefaultClient
+	testAdminClient = v1connect.NewAdminServiceClient(
+		adminConn,
+		"http://"+testRPCAddr,
+		connect.WithInterceptors(testAdminAuthInterceptor),
+	)
+
+	code := m.Run()
+
+	if err := be.Shutdown(); err != nil {
+		log.Fatal(err)
+	}
+	testRPCServer.Shutdown(true)
+	os.Exit(code)
+}
+
+func TestSDKRPCServerBackend(t *testing.T) {
+	t.Run("activate/deactivate client test", func(t *testing.T) {
+		testcases.RunActivateAndDeactivateClientTest(t, testClient)
+	})
+
+	t.Run("deactivate with attaching document test", func(t *testing.T) {
+		testcases.RunDeactivateClientWithAttachingDocumentTest(t, testClient, testBackend)
+	})
+
+	t.Run("deactivate with attached document test", func(t *testing.T) {
+		testcases.RunDeactivateClientWithAttachedDocumentTest(t, testClient, testBackend)
+	})
+
+	t.Run("attach/detach document test", func(t *testing.T) {
+		testcases.RunAttachAndDetachDocumentTest(t, testClient)
+	})
+
+	t.Run("attach/detach on removed document test", func(t *testing.T) {
+		testcases.RunAttachAndDetachRemovedDocumentTest(t, testClient)
+	})
+
+	t.Run("push/pull changes test", func(t *testing.T) {
+		testcases.RunPushPullChangeTest(t, testClient)
+	})
+
+	t.Run("push/pull on removed document test", func(t *testing.T) {
+		testcases.RunPushPullChangeOnRemovedDocumentTest(t, testClient)
+	})
+
+	t.Run("remove document test", func(t *testing.T) {
+		testcases.RunRemoveDocumentTest(t, testClient)
+	})
+
+	t.Run("remove document with invalid client state test", func(t *testing.T) {
+		testcases.RunRemoveDocumentWithInvalidClientStateTest(t, testClient)
+	})
+
+	t.Run("watch document test", func(t *testing.T) {
+		testcases.RunWatchDocumentTest(t, testClient)
+	})
+
+	t.Run("watch document actor mismatch test", func(t *testing.T) {
+		testcases.RunWatchDocumentActorMismatchTest(t, testClient)
+	})
+
+	t.Run("watch resource rejection test", func(t *testing.T) {
+		testcases.RunWatchResourceRejectionTest(t, testClient)
+	})
+
+	t.Run("max subscribers per document test", func(t *testing.T) {
+		testcases.RunMaxSubscribersPerDocumentConcurrencyTest(t, testClient, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("max attachments per document test", func(t *testing.T) {
+		testcases.RunMaxAttachmentsPerDocumentConcurrencyTest(t, testClient, testAdminClient, testAdminAuthInterceptor)
+	})
+}
+
+func TestAdminRPCServerBackend(t *testing.T) {
+	t.Run("admin signup test", func(t *testing.T) {
+		testcases.RunAdminSignUpTest(t, testAdminClient)
+	})
+
+	t.Run("admin login test", func(t *testing.T) {
+		testcases.RunAdminLoginTest(t, testAdminClient)
+	})
+
+	t.Run("admin delete account test", func(t *testing.T) {
+		testcases.RunAdminDeleteAccountTest(t, testAdminClient)
+	})
+
+	t.Run("admin change password test", func(t *testing.T) {
+		testcases.RunAdminChangePasswordTest(t, testAdminClient)
+	})
+
+	t.Run("admin create project test", func(t *testing.T) {
+		testcases.RunAdminCreateProjectTest(t, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("admin list projects test", func(t *testing.T) {
+		testcases.RunAdminListProjectsTest(t, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("admin get project test", func(t *testing.T) {
+		testcases.RunAdminGetProjectTest(t, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("admin update project test", func(t *testing.T) {
+		testcases.RunAdminUpdateProjectTest(t, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("admin list documents test", func(t *testing.T) {
+		testcases.RunAdminListDocumentsTest(t, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("admin get document test", func(t *testing.T) {
+		testcases.RunAdminGetDocumentTest(t, testClient, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("admin get documents test", func(t *testing.T) {
+		testcases.RunAdminGetDocumentsTest(t, testClient, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("admin list changes test", func(t *testing.T) {
+		testcases.RunAdminListChangesTest(t, testClient, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("admin get server version test", func(t *testing.T) {
+		testcases.RunAdminGetServerVersionTest(t, testAdminClient)
+	})
+
+	t.Run("admin rotate project keys test", func(t *testing.T) {
+		testcases.RunAdminRotateProjectKeysTest(t, testClient, testAdminClient, testAdminAuthInterceptor)
+	})
+
+	t.Run("admin get channels test", func(t *testing.T) {
+		testcases.RunAdminGetChannelsTest(t, testClient, testAdminClient)
+	})
+
+	t.Run("admin get channels multi path test", func(t *testing.T) {
+		testcases.RunAdminGetChannelsMultiPathTest(t, testClient, testAdminClient)
+	})
+}
+
+func TestServerStart(t *testing.T) {
+	t.Run("listening before start returns test", func(t *testing.T) {
+		svr, err := rpc.NewServer(&rpc.Config{
+			Port:              helper.RPCPort + 10,
+			ReadHeaderTimeout: helper.RPCReadHeaderTimeout,
+			IdleTimeout:       helper.RPCIdleTimeout,
+		}, testBackend)
+		require.NoError(t, err)
+		require.NoError(t, svr.Start())
+		defer svr.Shutdown(true)
+
+		// NOTE(hackerwins): Start should not return until the port is bound,
+		// so a client dialing right after it must not be refused.
+		conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", helper.RPCPort+10))
+		require.NoError(t, err)
+		assert.NoError(t, conn.Close())
+	})
+
+	t.Run("port already in use test", func(t *testing.T) {
+		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", helper.RPCPort+11))
+		require.NoError(t, err)
+		defer func() { assert.NoError(t, lis.Close()) }()
+
+		svr, err := rpc.NewServer(&rpc.Config{
+			Port:              helper.RPCPort + 11,
+			ReadHeaderTimeout: helper.RPCReadHeaderTimeout,
+			IdleTimeout:       helper.RPCIdleTimeout,
+		}, testBackend)
+		require.NoError(t, err)
+		assert.Error(t, svr.Start())
+	})
+
+	t.Run("listener released when serving fails test", func(t *testing.T) {
+		// NOTE(hackerwins): server_test.go is a readable file but not a key
+		// pair, so ServeTLS fails while loading it, before it reaches Serve.
+		svr, err := rpc.NewServer(&rpc.Config{
+			Port:              helper.RPCPort + 12,
+			CertFile:          "server_test.go",
+			KeyFile:           "server_test.go",
+			ReadHeaderTimeout: helper.RPCReadHeaderTimeout,
+			IdleTimeout:       helper.RPCIdleTimeout,
+		}, testBackend)
+		require.NoError(t, err)
+		require.NoError(t, svr.Start())
+		defer svr.Shutdown(true)
+
+		// The port must not stay bound once serving has given up.
+		assert.Eventually(t, func() bool {
+			lis, err := net.Listen("tcp", fmt.Sprintf(":%d", helper.RPCPort+12))
+			if err != nil {
+				return false
+			}
+			return lis.Close() == nil
+		}, 3*time.Second, 10*time.Millisecond)
+	})
+}
+
+func TestConfig_Validate(t *testing.T) {
+	scenarios := []*struct {
+		config   *rpc.Config
+		expected error
+	}{
+		{config: &rpc.Config{Port: -1}, expected: rpc.ErrInvalidRPCPort},
+		{config: &rpc.Config{Port: 8080, CertFile: "noSuchCertFile"}, expected: rpc.ErrInvalidCertFile},
+		{config: &rpc.Config{Port: 8080, KeyFile: "noSuchKeyFile"}, expected: rpc.ErrInvalidKeyFile},
+		// not to use tls
+		{config: &rpc.Config{
+			Port:              8080,
+			CertFile:          "",
+			KeyFile:           "",
+			ReadHeaderTimeout: helper.RPCReadHeaderTimeout,
+			IdleTimeout:       helper.RPCIdleTimeout,
+		},
+			expected: nil},
+		// pass any file existing
+		{config: &rpc.Config{
+			Port:              8080,
+			CertFile:          "server_test.go",
+			KeyFile:           "server_test.go",
+			ReadHeaderTimeout: helper.RPCReadHeaderTimeout,
+			IdleTimeout:       helper.RPCIdleTimeout,
+		},
+			expected: nil},
+	}
+	for _, scenario := range scenarios {
+		assert.ErrorIs(t, scenario.config.Validate(), scenario.expected, "provided config: %#v", scenario.config)
+	}
+}

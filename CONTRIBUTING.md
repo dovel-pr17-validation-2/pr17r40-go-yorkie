@@ -1,0 +1,236 @@
+# Contributing
+
+Yorkie is Apache 2.0 licensed and accepts contributions via GitHub pull requests. This document outlines some conventions on commit message formatting, contact points for developers, and other resources to help get contributions into Yorkie.
+
+## Contacts
+
+If you have any questions along the way, please don’t hesitate to ask us
+
+- Discord: [Yorkie Discord](https://discord.com/invite/MVEAwz9sBy).
+
+## Contribution Flow
+
+This is a rough outline of a contributor's workflow:
+
+1. Install prerequisites for developing Yorkie.
+2. Create a personal fork of the original repository.
+3. Clone the fork to your local working directory.
+4. Set environment for building and testing.
+5. Create a topic branch from where to base the contribution (usually main).
+6. Make commits of logical units.
+   - Make sure all tests pass, and add any new tests as appropriate.
+   - Make sure commit messages are in the proper format (see below).
+7. Push changes in a topic branch to the forked repository.
+8. Submit a pull request to the original repository.
+9. Address any review comments from CodeRabbit and maintainers.
+10. After receiving LGTM from maintainers, the PR will be merged.
+
+Thanks for contributing!
+
+## Setting Developing Environment
+
+### Requirements
+
+Below are needed for developing and building Yorkie.
+
+- [Go](https://golang.org) (version 1.26+)
+- [Protobuf Compiler](https://github.com/protocolbuffers/protobuf/releases) (version 3.4.0+)
+- [Docker](https://www.docker.com/)
+
+### Building & Testing
+
+You must install required Go packages to build Yorkie executable.
+
+```sh
+make tools
+make build		# executable: ./bin/yorkie
+```
+
+> [!NOTE]
+> `make tools` installs binaries into `$(go env GOPATH)/bin`. Make sure that directory is in your `PATH` so the installed tools (e.g. `golangci-lint`) are accessible:
+> ```sh
+> export PATH=$PATH:$(go env GOPATH)/bin
+> # Add this line to your shell rc file (~/.zshrc, ~/.bashrc, etc.) to make it permanent.
+> ```
+
+You can set testing environment via Docker Compose. It is needed because integration tests require local applications like MongoDB.
+
+```sh
+docker compose -f build/docker/docker-compose.yml up --build -d
+make test
+```
+
+You can automatically check the programmatic and stylistic errors of your code.
+
+```sh
+make lint
+```
+
+> [!NOTE]  
+> If you have an old version of `golangci-lint` installed locally, running `make lint` may fail—especially if the linter doesn't support the newer version of Go. It's recommended to run `make tools` periodically to keep your tools up to date.
+>
+> When your local Go is a newer minor than the `go` line in `go.mod` (CI's
+> version), the Makefile runs every target under that version by exporting
+> `GOTOOLCHAIN`, so `make lint` and the `go fix` check see what CI sees. The
+> first run downloads that toolchain. A `GOTOOLCHAIN` you set yourself, in the
+> environment, on the `make` command line or with `go env -w`, wins.
+
+`make verify` is the gate a commit has to pass: `make lint`, the licence
+headers, the `go fix` check, and the unit tests. It leaves out the integration
+lane, which needs MongoDB and runs in CI. When the `go fix` check fails, run
+`make modernize` and commit the result. The hooks installed by `scripts/setup.sh` run it for
+you — see Commit Message Format below.
+
+### Setting for VSCode
+If you are using VSCode, add the following in your `.vscode/settings.json` so that proper language features work correctly in test files
+with build tag `integration`, `bench`, or `complex`.
+```json
+{
+  "gopls": {
+    "build.buildFlags": ["-tags=integration,bench,complex"]
+  }
+}
+```
+
+## Design Documents
+
+For developers, [design documents](docs/design/README.md) about core features are provided. You can refer to the docs for understanding the overall structure of Yorkie.
+
+## Conventions
+
+### Code Style
+
+The coding style suggested by the Golang community is used in Yorkie. See the [style doc](https://github.com/golang/go/wiki/CodeReviewComments) for details. We also recommended referring to [Uber Go Style Guide](https://github.com/uber-go/guide/blob/master/style.md).
+
+If you make any changes to the code, run `make fmt` to automatically format the code according to Go [standards](https://golang.org/doc/effective_go.html#formatting).
+
+When spawning a goroutine tracked by a `sync.WaitGroup`, use [`wg.Go(f)`](https://pkg.go.dev/sync#WaitGroup.Go) instead of the `wg.Add(1)` / `go func() { defer wg.Done(); ... }()` idiom — it keeps the `Add`/`Done` pairing balanced automatically. Since Go 1.22, `for`-loop variables are scoped per iteration, so a `wg.Go` closure can capture the loop variable directly — no need to copy it into a shadow variable first.
+
+### Commit Message Format
+
+We follow a rough convention for commit messages that is designed to answer two questions: what changed and why. The subject line should feature the what and the body of the commit should describe the why.
+
+```
+Remove the synced seq when detaching the document
+
+To collect garbage like CRDT tombstones left on the document, all
+the changes should be applied to other replicas before GC. For this
+, if the document is no longer used by this client, it should be
+detached.
+```
+
+The first line is the subject and should be no longer than 70 characters, the second line is always blank, and other lines should be wrapped at 80 characters. This allows the message to be easier to read on GitHub as well as in various git tools.
+
+To enable the local hooks, run:
+
+```sh
+bash scripts/setup.sh
+```
+
+This points `core.hooksPath` at the tracked `.githooks/` (a relative path,
+so every linked worktree of the clone uses its own checkout's copy) and
+installs the Claude Code hooks. The hooks validate every commit message
+against the format above, run `make lint` on commit, and run `make verify`
+(lint, licence headers, the `go fix` check and the unit tests) on push.
+Hook changes take effect on checkout; there is nothing to re-run.
+
+The hooks run the checked-out tree: its `Makefile`, `.golangci.yml` and
+test code. Committing or pushing in a checkout of someone else's branch
+therefore runs that branch's `.githooks/` and builds and tests it, exactly
+as `make verify` typed by hand would — read a branch, hooks included,
+before you build in it.
+
+The Claude Code hooks are different: they run when a session opens, so
+`setup.sh` copies them into your clone's shared `$GIT_DIR` and wires the
+gitignored `.claude/settings.local.json` at that copy. Re-run `setup.sh` to
+pick up changes to them. Because that re-run copies whatever the current
+worktree holds, it refuses when `scripts/hooks/`, `setup.sh` itself or the
+shared `scripts/*.mjs` modules the installer imports differ from
+`upstream/main` (or `origin/main` without one). Re-run it on the default
+branch; if you are the one changing those hooks, say so with
+`YORKIE_ALLOW_LOCAL_HOOKS=1 bash scripts/setup.sh`.
+
+If your clone was set up before October 2026, run `bash scripts/setup.sh`
+once more: `core.hooksPath` still points at the old `$GIT_DIR/githooks`
+copy, which keeps running a guard that has since been removed. `make lint`
+warns when it finds that wiring, and `setup.sh` deletes the old copy once
+it rewires the clone.
+
+The integration lane is not in the git hooks — it needs MongoDB, so CI runs it.
+Any of the three can be bypassed with `--no-verify` when you mean to.
+
+The two gates refuse rather than skip when the tool they need is absent
+— a gate that quietly does nothing when its checker is missing is the
+case it exists to prevent. `pre-commit` needs `golangci-lint` only when
+the commit stages a `.go` file, so a documentation-only change needs no
+Go toolchain; `pre-push` needs `node` for the licence check. `make
+tools` installs the first.
+
+### Testing
+
+Testing is the responsibility of all contributors, but it is also coordinated by maintainers. It is recommended to write them in order from successful cases to exceptional cases.
+
+There are multiple types of tests. The location of the test code varies with type, as do the specifics of the environment needed to successfully run the test:
+
+- Unit: These confirm that a particular function behaves as intended.
+- Integration: These tests cover interactions of package components or interactions between Yorkie packages and some other non-Yorkie system resource (eg: MongoDB).
+- Benchmark: These confirm that the performance of the implemented function.
+
+When a unit test needs to observe a timer, ticker, debounce window, or backoff, use a [`testing/synctest`](https://pkg.go.dev/testing/synctest) bubble (`synctest.Test`) instead of sleeping real wall-clock time. Inside the bubble, `time.Sleep` advances a fake clock instantly and `synctest.Wait` deterministically replaces "sleep a little to let goroutines catch up", which keeps tests fast and free of load-dependent flakes. See `pkg/limit/limiter_test.go` for examples.
+
+### Code Coverage
+
+We are using [Codecov](https://about.codecov.io) for analyzing PR's code coverage. If you want to check the coverage of your code in local browser, you can run the command below.
+
+```sh
+make coverage
+```
+
+### Code Review
+
+We use GitHub's pull request review feature to review code. We also use CodeRabbit to automate code review for reducing the effort of maintainers. CodeRabbit will automatically review your pull request and provide feedback on code quality, test coverage, and more.
+
+We require that all code is reviewed by at least one maintainer before being merged. We may ask for changes to be made to the code before it is merged.
+
+#### `@claude` commands on a pull request
+
+You can also ask for a machine review by commenting on the pull request. Matching is flexible — a comment triggers a command when it contains `@claude <verb>` anywhere, case-insensitive, so `@claude review this please` works. The verb has to follow the mention directly: `@claude please review` does not.
+
+| Comment | Who can trigger it | What it does |
+| --- | --- | --- |
+| `@claude review` | write access | Runs a multi-lens review panel and posts its findings as one comment. Advisory: it creates no status checks and cannot block a merge. Works on forks, when a maintainer comments. |
+| `@claude summarize` | write access | Posts a short read-only "what this PR does / is it good to go?" comment. Works on forks, when a maintainer comments. |
+| `@claude loop` | write access | Opts the PR into the autonomous review → fix → promote loop. Same-repo branches only; on a fork it falls back to `@claude review`. |
+| `@claude fix` | write access | One fix attempt against the review panel's standing verdict. Needs a panel run on the current commit, and does not clear a paged PR. |
+| `@claude rerun` | write access | Clears a PR the loop handed to a human and re-engages it. Pushing a commit does not do this. |
+| `@claude …` (anything else) | write access | Treats your comment as review feedback to address in the thread. Only on agent-authored branches — an ordinary PR's review threads are left to people. |
+
+`review` and `summarize` are throttled to one run per commit; push a new commit to re-run. **None of these can approve or merge** — a maintainer's review is always required, and the loop's terminal states are *ready for review* or *handed to a human*.
+
+Type these as a **normal PR comment**, not inside an inline review thread. Only the bare-mention fallback listens to review-comment threads; a verb typed there reaches no workflow and answers nothing.
+
+One thing to know about `@claude loop`: when the loop converges it tries to flip the PR to ready for review, and one of its gates is that the PR body discloses autonomous AI authorship. A PR written from the template does not, so that gate refuses and the PR stays as it is — which is correct once the fixer has pushed commits to your branch, because the person picking it up should be told that before they read it. Add a line saying so, or mark the PR ready yourself.
+
+The blocking `design-fit` lens reads the issue your PR body closes with `Fixes #N`, and it only trusts that issue once a maintainer has labelled it `agent:candidate` — which nothing does automatically for a human-opened PR, so by default that lens reviews with no spec. If you are filing the issue yourself, the **Agent Task** template asks for the outcome, the acceptance criteria and the non-goals the lens actually reads; a maintainer who has read it can then apply the label. Why it is not automatic is in `docs/design/agent-command-verbs.md` §1.1.
+
+Nothing here runs unless a maintainer has enabled the surface for the repository, and the verbs that push commits (`loop`, `fix`, `rerun`) additionally need a GitHub App. Until that exists they answer with a comment saying so rather than failing silently — `review` and `summarize` need neither and work as soon as the surface is on. The design, the phases, and what each one needs are in [agent-command-verbs.md](docs/design/agent-command-verbs.md).
+
+## Contributor License Agreement (CLA)
+
+We require that all contributors sign our Contributor License Agreement ("CLA") before we can accept the contribution.
+
+### Signing the CLA
+
+Open a pull request ("PR") to any of our open source projects to sign the CLA. A bot will comment on the PR asking you to sign the CLA if you haven't already.
+
+Follow the steps given by the bot to sign the CLA. This will require you to log in with GitHub. We will only use this information for CLA tracking. You only have to sign the CLA once. Once you've signed the CLA, future contributions to the project will not require you to sign again.
+
+If the bot still require you to sign the CLA although you had already signed, you can check your commit's author is equal to the Github account that you logged in.
+
+### Why Require a CLA?
+
+Agreeing to a CLA explicitly states that you are entitled to provide a contribution, that you cannot withdraw permission to use your contribution at a later date, and that Yorkie Team has permission to use your contribution.
+
+This removes any ambiguities or uncertainties caused by not having a CLA and allows users and customers to confidently adopt our projects. At the same time, the CLA ensures that all contributions to our open source projects are licensed under the project's respective open source license, such as Apache-2.0 License.
+
+Requiring a CLA is a common and well-accepted practice in open source. Major open source projects require CLAs such as Apache Software Foundation projects, Facebook projects, Google projects, Python, Django, and more. Each of these projects remains licensed under permissive OSS licenses such as MIT, Apache, BSD, and more.

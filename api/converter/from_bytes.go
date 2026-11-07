@@ -1,0 +1,523 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package converter
+
+import (
+	"fmt"
+
+	"google.golang.org/protobuf/proto"
+
+	api "github.com/yorkie-team/yorkie/api/yorkie/v1"
+	"github.com/yorkie-team/yorkie/pkg/document/crdt"
+	"github.com/yorkie-team/yorkie/pkg/document/presence"
+	"github.com/yorkie-team/yorkie/pkg/document/time"
+	"github.com/yorkie-team/yorkie/pkg/errors"
+)
+
+// ErrUnmarshallFailed is returned when unmarshalling fails.
+var ErrUnmarshallFailed = errors.Internal("unmarshal failed")
+
+// BytesToSnapshot creates a Snapshot from the given byte array.
+func BytesToSnapshot(snapshot []byte) (*crdt.Object, *presence.Map, error) {
+	if len(snapshot) == 0 {
+		return crdt.NewObject(crdt.NewElementRHT(), time.InitialTicket), presence.NewMap(), nil
+	}
+
+	pbSnapshot := &api.Snapshot{}
+	if err := proto.Unmarshal(snapshot, pbSnapshot); err != nil {
+		return nil, nil, fmt.Errorf("unmarshal snapshot: %w", err)
+	}
+
+	obj, err := fromJSONElement(pbSnapshot.GetRoot())
+	if err != nil {
+		return nil, nil, err
+	}
+	root, ok := obj.(*crdt.Object)
+	if !ok {
+		return nil, nil, fmt.Errorf("snapshot root is not an object")
+	}
+
+	presences := fromPresences(pbSnapshot.GetPresences())
+	return root, presences, nil
+}
+
+// BytesToObject creates an Object from the given byte array.
+func BytesToObject(snapshot []byte) (*crdt.Object, error) {
+	if len(snapshot) == 0 {
+		return nil, errors.InvalidArgument("snapshot should not be empty")
+	}
+
+	pbElem := &api.JSONElement{}
+	if err := proto.Unmarshal(snapshot, pbElem); err != nil {
+		return nil, fmt.Errorf("unmarshal element: %w", err)
+	}
+
+	obj, err := fromJSONObject(pbElem.GetJsonObject())
+	if err != nil {
+		return nil, err
+	}
+
+	return obj, nil
+}
+
+// BytesToArray creates a Array from the given byte array.
+func BytesToArray(snapshot []byte) (*crdt.Array, error) {
+	if len(snapshot) == 0 {
+		return nil, errors.InvalidArgument("snapshot should not be empty")
+	}
+
+	pbArray := &api.JSONElement{}
+	if err := proto.Unmarshal(snapshot, pbArray); err != nil {
+		return nil, fmt.Errorf("unmarshal array: %w", err)
+	}
+
+	array, err := fromJSONArray(pbArray.GetJsonArray())
+	if err != nil {
+		return nil, err
+	}
+
+	return array, nil
+}
+
+// BytesToTree creates a Tree from the given byte array.
+func BytesToTree(snapshot []byte) (*crdt.Tree, error) {
+	if len(snapshot) == 0 {
+		return nil, errors.InvalidArgument("snapshot should not be empty")
+	}
+
+	pbTree := &api.JSONElement{}
+	if err := proto.Unmarshal(snapshot, pbTree); err != nil {
+		return nil, fmt.Errorf("unmarshal tree: %w", err)
+	}
+
+	tree, err := fromJSONTree(pbTree.GetTree())
+	if err != nil {
+		return nil, err
+	}
+
+	return tree, nil
+}
+
+func fromJSONElement(pbElem *api.JSONElement) (crdt.Element, error) {
+	if pbElem == nil {
+		return nil, fmt.Errorf("json element is nil")
+	}
+	switch decoded := pbElem.Body.(type) {
+	case *api.JSONElement_JsonObject:
+		return fromJSONObject(decoded.JsonObject)
+	case *api.JSONElement_JsonArray:
+		return fromJSONArray(decoded.JsonArray)
+	case *api.JSONElement_Primitive_:
+		return fromJSONPrimitive(decoded.Primitive)
+	case *api.JSONElement_Text_:
+		return fromJSONText(decoded.Text)
+	case *api.JSONElement_Counter_:
+		return fromJSONCounter(decoded.Counter)
+	case *api.JSONElement_Tree_:
+		return fromJSONTree(decoded.Tree)
+	default:
+		return nil, fmt.Errorf("%s: %w", decoded, ErrUnsupportedElement)
+	}
+}
+
+func fromJSONObject(pbObj *api.JSONElement_JSONObject) (*crdt.Object, error) {
+	if pbObj == nil {
+		return nil, fmt.Errorf("json object is nil")
+	}
+	members := crdt.NewElementRHT()
+	for _, pbNode := range pbObj.Nodes {
+		elem, err := fromJSONElement(pbNode.Element)
+		if err != nil {
+			return nil, err
+		}
+		if elem.CreatedAt() == nil {
+			return nil, fmt.Errorf("json_object.node.created_at: %w", ErrMissingTicket)
+		}
+		// NOTE: elem already carries its own decoded movedAt/removedAt, so
+		// the LWW tie-break for re-inserting it into the RHT must use its
+		// own positionedAt (movedAt falling back to createdAt), not its
+		// createdAt -- otherwise a member restored by undo/redo (whose
+		// createdAt predates its movedAt) can lose the LWW race here and be
+		// silently dropped from the decoded object. Mirrors fromObject in
+		// the JS SDK (fromObject in converter.ts), which passes
+		// value.getPositionedAt() to rht.set.
+		members.SetWithExecutedAt(pbNode.Key, elem, crdt.PositionedAt(elem))
+	}
+
+	// These bytes are not always a server-built snapshot: the same decoder reads
+	// the element payload of a client-pushed Set/Add/ArraySet (fromElement ->
+	// sanitizeElement -> BytesToObject). The element's createdAt is what
+	// ElementRHT and RGATreeList key on, so an absent one is a nil dereference
+	// when the operation is applied -- required here for the same reason
+	// fromRequiredTimeTicket requires the operation's own tickets.
+	createdAt, err := fromRequiredTimeTicket(pbObj.CreatedAt, "json_object.created_at")
+	if err != nil {
+		return nil, err
+	}
+
+	movedAt, err := fromTimeTicket(pbObj.MovedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	removedAt, err := fromTimeTicket(pbObj.RemovedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	obj := crdt.NewObject(
+		members,
+		createdAt,
+	)
+	obj.SetMovedAt(movedAt)
+	obj.SetRemovedAt(removedAt)
+
+	return obj, nil
+}
+
+func fromJSONArray(pbArr *api.JSONElement_JSONArray) (*crdt.Array, error) {
+	if pbArr == nil {
+		return nil, fmt.Errorf("json array is nil")
+	}
+	elements := crdt.NewRGATreeList()
+	for _, pbNode := range pbArr.Nodes {
+		if pbNode.Element == nil {
+			// Dead position node (abandoned by a move).
+			if pbNode.PositionCreatedAt == nil || pbNode.PositionRemovedAt == nil {
+				return nil, fmt.Errorf("json_array.node.position_created_at/position_removed_at: %w", ErrMissingTicket)
+			}
+			posCreatedAt, err := fromTimeTicket(pbNode.PositionCreatedAt)
+			if err != nil {
+				return nil, err
+			}
+			posRemovedAt, err := fromTimeTicket(pbNode.PositionRemovedAt)
+			if err != nil {
+				return nil, err
+			}
+			elements.AddDeadPosition(posCreatedAt, posRemovedAt)
+			continue
+		}
+
+		elem, err := fromJSONElement(pbNode.Element)
+		if err != nil {
+			return nil, err
+		}
+		if elem.CreatedAt() == nil {
+			return nil, fmt.Errorf("json_array.node.created_at: %w", ErrMissingTicket)
+		}
+
+		posMovedAt, err := fromTimeTicket(pbNode.PositionMovedAt)
+		if err != nil {
+			return nil, err
+		}
+
+		if posMovedAt != nil {
+			if pbNode.PositionCreatedAt == nil {
+				return nil, fmt.Errorf("json_array.node.position_created_at: %w", ErrMissingTicket)
+			}
+			posCreatedAt, err := fromTimeTicket(pbNode.PositionCreatedAt)
+			if err != nil {
+				return nil, err
+			}
+			if err = elements.AddMovedElement(elem, posCreatedAt, posMovedAt); err != nil {
+				return nil, err
+			}
+		} else {
+			if err = elements.Add(elem); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// See fromJSONObject: client-supplied element bytes reach here too.
+	createdAt, err := fromRequiredTimeTicket(pbArr.CreatedAt, "json_array.created_at")
+	if err != nil {
+		return nil, err
+	}
+	movedAt, err := fromTimeTicket(pbArr.MovedAt)
+	if err != nil {
+		return nil, err
+	}
+	removedAt, err := fromTimeTicket(pbArr.RemovedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	arr := crdt.NewArray(
+		elements,
+		createdAt,
+	)
+	arr.SetMovedAt(movedAt)
+	arr.SetRemovedAt(removedAt)
+	return arr, nil
+}
+
+func fromJSONPrimitive(
+	pbPrim *api.JSONElement_Primitive,
+) (*crdt.Primitive, error) {
+	// See fromJSONObject: client-supplied element bytes reach here too.
+	createdAt, err := fromRequiredTimeTicket(pbPrim.CreatedAt, "json_primitive.created_at")
+	if err != nil {
+		return nil, err
+	}
+	movedAt, err := fromTimeTicket(pbPrim.MovedAt)
+	if err != nil {
+		return nil, err
+	}
+	removedAt, err := fromTimeTicket(pbPrim.RemovedAt)
+	if err != nil {
+		return nil, err
+	}
+	valueType, err := fromPrimitiveValueType(pbPrim.Type)
+	if err != nil {
+		return nil, err
+	}
+	value, err := crdt.ValueFromBytes(valueType, pbPrim.Value)
+	if err != nil {
+		return nil, err
+	}
+	primitive, err := crdt.NewPrimitive(value, createdAt)
+	if err != nil {
+		return nil, err
+	}
+	primitive.SetMovedAt(movedAt)
+	primitive.SetRemovedAt(removedAt)
+	return primitive, nil
+}
+
+func fromJSONText(
+	pbText *api.JSONElement_Text,
+) (*crdt.Text, error) {
+	// See fromJSONObject: client-supplied element bytes reach here too.
+	createdAt, err := fromRequiredTimeTicket(pbText.CreatedAt, "json_text.created_at")
+	if err != nil {
+		return nil, err
+	}
+	movedAt, err := fromTimeTicket(pbText.MovedAt)
+	if err != nil {
+		return nil, err
+	}
+	removedAt, err := fromTimeTicket(pbText.RemovedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	rgaTreeSplit := crdt.NewRGATreeSplit(crdt.InitialTextNode())
+	current := rgaTreeSplit.InitialHead()
+	for _, pbNode := range pbText.Nodes {
+		textNode, err := fromTextNode(pbNode)
+		if err != nil {
+			return nil, err
+		}
+		current = rgaTreeSplit.InsertAfter(current, textNode)
+		insPrevID, err := fromTextNodeID(pbNode.InsPrevId)
+		if err != nil {
+			return nil, err
+		}
+		if insPrevID != nil {
+			insPrevNode := rgaTreeSplit.FindNode(insPrevID)
+			if insPrevNode == nil {
+				return nil, fmt.Errorf("insPrevNode should be presence")
+			}
+			current.SetInsPrev(insPrevNode)
+		}
+	}
+
+	text := crdt.NewText(
+		rgaTreeSplit,
+		createdAt,
+	)
+	text.SetMovedAt(movedAt)
+	text.SetRemovedAt(removedAt)
+
+	return text, nil
+}
+
+func fromJSONCounter(pbCnt *api.JSONElement_Counter) (*crdt.Counter, error) {
+	// See fromJSONObject: client-supplied element bytes reach here too.
+	createdAt, err := fromRequiredTimeTicket(pbCnt.CreatedAt, "json_counter.created_at")
+	if err != nil {
+		return nil, err
+	}
+	movedAt, err := fromTimeTicket(pbCnt.MovedAt)
+	if err != nil {
+		return nil, err
+	}
+	removedAt, err := fromTimeTicket(pbCnt.RemovedAt)
+	if err != nil {
+		return nil, err
+	}
+	counterType, err := fromCounterType(pbCnt.Type)
+	if err != nil {
+		return nil, err
+	}
+	counterValue, err := crdt.CounterValueFromBytes(counterType, pbCnt.Value)
+	if err != nil {
+		return nil, err
+	}
+
+	counter, err := crdt.NewCounter(
+		counterType,
+		counterValue,
+		createdAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	counter.SetMovedAt(movedAt)
+	counter.SetRemovedAt(removedAt)
+	if counter.IsDedup() && len(pbCnt.GetHllRegisters()) > 0 {
+		if err := counter.RestoreHLL(pbCnt.GetHllRegisters()); err != nil {
+			return nil, err
+		}
+	}
+
+	return counter, nil
+}
+
+func fromTextNode(
+	pbNode *api.TextNode,
+) (*crdt.RGATreeSplitNode[*crdt.TextValue], error) {
+	id, err := fromTextNodeID(pbNode.Id)
+	if err != nil {
+		return nil, err
+	}
+	if id == nil {
+		return nil, fmt.Errorf("text node id is nil")
+	}
+
+	attrs := crdt.NewRHT()
+	for key, pbAttr := range pbNode.Attributes {
+		if pbAttr == nil {
+			return nil, fmt.Errorf("text node attribute missing")
+		}
+
+		updatedAt, err := fromTimeTicket(pbAttr.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		// See fromRHT: updatedAt is what RHTNode.IDString is built from, and
+		// honouring isRemoved means a decoded attribute can now become a GC
+		// pair on this path too, so an absent ticket has to be refused here
+		// rather than faulting inside NewRoot on every later load.
+		if updatedAt == nil {
+			return nil, fmt.Errorf("text node attribute missing updatedAt")
+		}
+		// NOTE(hackerwins): SetInternal is used instead of Set to restore the
+		// `isRemoved` flag as-is. Unlike Set, it never loses to an existing
+		// occupant and keeps the removed element count in sync. This is safe
+		// here because the RHT is freshly built and the keys are unique.
+		//
+		// A removed attribute's value is dropped by SetInternal: a snapshot
+		// written before Remove stopped copying the value still carries one,
+		// and restoring it would size the tombstone differently from a replica
+		// that performed the removal under the current code.
+		attrs.SetInternal(key, pbAttr.Value, updatedAt, pbAttr.IsRemoved)
+	}
+
+	textNode := crdt.NewRGATreeSplitNode(
+		id,
+		crdt.NewTextValue(pbNode.Value, attrs),
+	)
+
+	if pbNode.RemovedAt != nil {
+		removedAt, err := fromTimeTicket(pbNode.RemovedAt)
+		if err != nil {
+			return nil, err
+		}
+		textNode.SetRemovedAt(removedAt)
+	}
+	if len(pbNode.RemovalEvents) > 0 {
+		// No bound here: a snapshot carries the ledgers its writer's own
+		// rules grew, and refusing one would leave the document unloadable.
+		// Client-pushed element payloads are bounded in sanitizeElement.
+		events := make([]*time.Ticket, 0, len(pbNode.RemovalEvents))
+		for _, e := range pbNode.RemovalEvents {
+			ticket, err := fromRequiredTimeTicket(e, "text_node.removal_events")
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, ticket)
+		}
+		// A ledger that breaks the rules is refused rather than dropped: a
+		// node left with removed_at alone answers isRemovedInView and
+		// uncancelledRemovalBy differently from every replica that holds the
+		// full ledger, which is a text that silently diverges from then on.
+		if err := textNode.SetRemovalEvents(events); err != nil {
+			return nil, fmt.Errorf("text_node.removal_events: %w", err)
+		}
+	}
+	return textNode, nil
+}
+
+func fromTextNodeID(
+	pbTextNodeID *api.TextNodeID,
+) (*crdt.RGATreeSplitNodeID, error) {
+	if pbTextNodeID == nil {
+		return nil, nil
+	}
+
+	createdAt, err := fromTimeTicket(pbTextNodeID.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if createdAt == nil {
+		return nil, fmt.Errorf("text_node_id.created_at: %w", ErrMissingTicket)
+	}
+
+	return crdt.NewRGATreeSplitNodeID(
+		createdAt,
+		int(pbTextNodeID.Offset),
+	), nil
+}
+
+func fromJSONTree(
+	pbTree *api.JSONElement_Tree,
+) (*crdt.Tree, error) {
+	if pbTree == nil {
+		return nil, fmt.Errorf("json tree is nil")
+	}
+	// See fromJSONObject: client-supplied element bytes reach here too.
+	createdAt, err := fromRequiredTimeTicket(pbTree.CreatedAt, "json_tree.created_at")
+	if err != nil {
+		return nil, err
+	}
+	movedAt, err := fromTimeTicket(pbTree.MovedAt)
+	if err != nil {
+		return nil, err
+	}
+	removedAt, err := fromTimeTicket(pbTree.RemovedAt)
+	if err != nil {
+		return nil, err
+	}
+	root, err := FromTreeNodes(pbTree.Nodes)
+	if err != nil {
+		return nil, err
+	}
+	if root == nil {
+		return nil, fmt.Errorf("json tree has no root node")
+	}
+
+	tree := crdt.NewTree(
+		root,
+		createdAt,
+	)
+	tree.SetMovedAt(movedAt)
+	tree.SetRemovedAt(removedAt)
+
+	return tree, nil
+}

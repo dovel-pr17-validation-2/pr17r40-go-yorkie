@@ -1,0 +1,771 @@
+/*
+ * Copyright 2021 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package packs
+
+import (
+	"context"
+	stderrors "errors"
+	"fmt"
+	"strconv"
+	gotime "time"
+
+	"connectrpc.com/connect"
+	"go.uber.org/zap"
+
+	"github.com/yorkie-team/yorkie/api/converter"
+	"github.com/yorkie-team/yorkie/api/types"
+	"github.com/yorkie-team/yorkie/api/types/events"
+	"github.com/yorkie-team/yorkie/pkg/document"
+	"github.com/yorkie-team/yorkie/pkg/document/change"
+	"github.com/yorkie-team/yorkie/pkg/document/time"
+	"github.com/yorkie-team/yorkie/pkg/errors"
+	"github.com/yorkie-team/yorkie/pkg/key"
+	"github.com/yorkie-team/yorkie/pkg/units"
+	"github.com/yorkie-team/yorkie/server/backend"
+	"github.com/yorkie-team/yorkie/server/backend/database"
+	"github.com/yorkie-team/yorkie/server/backend/sync"
+	"github.com/yorkie-team/yorkie/server/clients"
+	"github.com/yorkie-team/yorkie/server/logging"
+)
+
+// DocKey generates document-wide sync key.
+func DocKey(projectID types.ID, docKey key.Key) sync.Key {
+	return sync.NewKey(fmt.Sprintf("doc-%s-%s", projectID, docKey))
+}
+
+// DocPushKey generates a sync key for pushing changes to the document.
+func DocPushKey(docKey types.DocRefKey) sync.Key {
+	return sync.NewKey(fmt.Sprintf("doc-push-%s-%s", docKey.ProjectID, docKey.DocID))
+}
+
+// DocPullKey generates a sync key for pulling changes from the document.
+func DocPullKey(clientID time.ActorID, docKey key.Key) sync.Key {
+	return sync.NewKey(fmt.Sprintf("doc-pull-%s-%s", clientID, docKey))
+}
+
+// PushPullOptions represents the options for PushPull.
+type PushPullOptions struct {
+	// Mode represents the sync mode.
+	Mode types.SyncMode
+
+	// Status represents the status of the document to be updated.
+	Status document.StatusType
+
+	// DisableGC, when true, makes the server skip minVV tracking for this
+	// client and omit the response VersionVector. Set per-request by the
+	// RPC handler from the matching wire field. See
+	// docs/design/disable-gc-on-attach.md.
+	DisableGC bool
+
+	// DisablePresence forwards the document-scope opt-out persisted on
+	// DocInfo. When true, the PushPull pipeline strips presence on both
+	// the write and read paths so the response carries an empty presence
+	// map regardless of what any client sends.
+	DisablePresence bool
+
+	// SizeChecked marks a push whose caller has already measured the
+	// resulting document against the project's MaxSizePerDocument with
+	// packs.CheckLiveSize. The server-side repair paths (admin document
+	// update, revision restore) rebuild the whole root, so they know the
+	// exact result; the snapshot-based push gate only knows the document is
+	// over quota and would refuse them, leaving an over-quota document with
+	// no way back under the limit. Never set from a client request.
+	SizeChecked bool
+}
+
+var (
+	// ErrInvalidServerSeq is returned when the given server seq greater than
+	// the initial server seq.
+	ErrInvalidServerSeq = errors.Internal("invalid server seq").WithCode("ErrInvalidServerSeq")
+
+	// ErrEpochMismatch is returned when the client's epoch does not match the
+	// document's epoch. This happens after compaction resets the document — the
+	// client must detach and re-attach to receive the compacted state.
+	ErrEpochMismatch = errors.FailedPrecond("epoch mismatch").WithCode("ErrEpochMismatch")
+)
+
+// PushPull stores the given changes and returns accumulated changes of the
+// given document.
+func PushPull(
+	ctx context.Context,
+	be *backend.Backend,
+	project *types.Project,
+	clientInfo *database.ClientInfo,
+	docKey types.DocRefKey,
+	reqPack *change.Pack,
+	opts PushPullOptions,
+) (*ServerPack, error) {
+	start := gotime.Now()
+	hostname := be.Config.Hostname
+
+	// 00. Validate ClientSeq continuity against the original request.
+	// Presence stripping must not run first: presence-only changes also
+	// occupy ClientSeq, and dropping them early would hide gaps.
+	if err := validateClientSeqContinuity(clientInfo.Checkpoint(docKey.DocID), reqPack); err != nil {
+		be.Metrics.AddPushPullErrors(hostname, project, 1)
+		return nil, err
+	}
+	if err := validateChangeActors(ctx, clientInfo, clientInfo.Checkpoint(docKey.DocID), docKey, reqPack); err != nil {
+		be.Metrics.AddPushPullErrors(hostname, project, 1)
+		return nil, err
+	}
+
+	// 01. Strip presence on the way in when the document opted out. Doing
+	// this before pushPack means no presence-only change ever reaches the
+	// changes collection, regardless of which SDK version sent it.
+	if opts.DisablePresence {
+		reqPack.Changes = stripPresenceChanges(reqPack.Changes)
+	}
+
+	// 01b. Fold presence patches into full puts, so only puts are stored and
+	// every client keeps pulling the full presence. A presence-disabled
+	// document has none left after the strip above.
+	var fold *presenceFold
+	if !opts.DisablePresence {
+		var err error
+		if fold, err = foldPresencePatches(be, clientInfo, docKey, reqPack); err != nil {
+			// A missing base is the expected fallback signal after an
+			// eviction, a restart or a shard move, not a failure.
+			return nil, err
+		}
+	}
+
+	// 02. push the change pack to the database.
+	// ServerSeq checks need a DocInfo snapshot under DocPushKey and must
+	// run after epoch mismatch handling, so they live in pushPack.
+	statusChange := opts.Status == document.StatusDetached || opts.Status == document.StatusRemoved
+	maxSize := project.MaxSizePerDocument
+	if opts.SizeChecked {
+		maxSize = 0
+	}
+	pushedChanges, docInfo, initialSeq, cpAfterPush, err := pushPack(
+		ctx, be, clientInfo, docKey, reqPack, maxSize, statusChange,
+	)
+	if err != nil {
+		be.Metrics.AddPushPullErrors(hostname, project, 1)
+		return nil, err
+	}
+
+	// 03. pull the pack from the database.
+	resPack, err := pullPack(ctx, be, clientInfo, project.SnapshotThreshold,
+		docInfo, reqPack, cpAfterPush, initialSeq, opts)
+
+	if err != nil {
+		be.Metrics.AddPushPullErrors(hostname, project, 1)
+		return nil, err
+	}
+
+	// 03b. Keep the client's presence for folding its next patch, keyed to
+	// the checkpoint the pull just recorded.
+	fold.commit(be, clientInfo, docKey.DocID, pushedChanges)
+
+	if logging.Enabled(zap.DebugLevel) {
+		pullLog := strconv.Itoa(resPack.ChangesLen())
+		if resPack.SnapshotLen() > 0 {
+			pullLog = units.HumanSize(float64(resPack.SnapshotLen()))
+		}
+		logging.From(ctx).Debugf(
+			"SYNC: '%s' is synced by '%s', push: %d, pull: %s, elapsed: %s",
+			docInfo.Key,
+			clientInfo.Key,
+			len(pushedChanges),
+			pullLog,
+			gotime.Since(start),
+		)
+	}
+
+	be.Metrics.AddPushPullReceivedChanges(hostname, project, reqPack.ChangesLen())
+	be.Metrics.AddPushPullReceivedOperations(hostname, project, reqPack.OperationsLen())
+	be.Metrics.AddPushPullSentChanges(hostname, project, resPack.ChangesLen())
+	be.Metrics.AddPushPullSentOperations(hostname, project, resPack.OperationsLen())
+	be.Metrics.AddPushPullSnapshotBytes(hostname, project, resPack.SnapshotLen())
+	be.Metrics.ObservePushPullResponseSeconds(gotime.Since(start).Seconds())
+
+	// 04. publish document event and store the snapshot if needed.
+	if len(pushedChanges) > 0 || reqPack.IsRemoved {
+		be.Go(func(ctx context.Context) {
+			// Publish under the actor of an accepted change so the pubsub
+			// self-echo filter (doc_subscription.go drops events whose Actor
+			// equals the subscriber) recognizes the author's own event. Watch
+			// subscribes under that same actor (WatchRequest.actor_id,
+			// yorkie_server.go Watch): new SDKs under the stable actor, old SDKs
+			// under the session id. Read it from an accepted change
+			// (pushedChanges), not reqPack.Changes[0], which may be an
+			// already-acknowledged change with a different actor in a malformed
+			// pack. A remove-only pack has no accepted change, so fall back to the
+			// session id; the client is detaching (its Watch is torn down), so a
+			// missed self-echo is moot. OwnActorID() is not used for the fallback:
+			// ActivateClient sets StableActorID for every client, so it would
+			// return the stable actor even for old SDKs that subscribe under the
+			// session id.
+			publisher, err := clientInfo.ID.ToActorID()
+			if err != nil {
+				logging.From(ctx).Error(err)
+				return
+			}
+			if len(pushedChanges) > 0 {
+				publisher, err = pushedChanges[0].ActorID.ToActorID()
+				if err != nil {
+					logging.From(ctx).Error(err)
+					return
+				}
+			}
+
+			// TODO(hackerwins): For now, we are publishing the event to pubsub and
+			// webhook manually. But we need to consider unified event handling system
+			// to handle this with rate-limiter and retry mechanism.
+			be.PubSub.Publish(ctx, publisher, events.DocEvent{
+				Type:  events.DocChanged,
+				Actor: publisher,
+				Key:   docKey,
+			})
+
+			if reqPack.OperationsLen() > 0 && project.RequireEventWebhook(events.DocRootChanged.WebhookType()) {
+				options, err := project.GetEventWebhookOptions()
+				if err != nil {
+					logging.From(ctx).Error(err)
+					return
+				}
+				if err := be.EventWebhookManager.Send(ctx, types.NewEventWebhookInfo(
+					docKey,
+					events.DocRootChanged.WebhookType(),
+					project.SecretKey,
+					project.EventWebhookURL,
+					docInfo.Key.String(),
+					options,
+				)); err != nil {
+					logging.From(ctx).Error(err)
+					return
+				}
+			}
+			if err := storeSnapshot(ctx, be, project.SnapshotInterval, docInfo); err != nil {
+				logging.From(ctx).Error(err)
+			}
+		}, "pushpull")
+	}
+
+	return resPack, nil
+}
+
+func validateClientSeqContinuity(cpBeforePush change.Checkpoint, reqPack *change.Pack) error {
+	// The clientSeq of the changes in the request pack must be continuous.
+	expectedClientSeq := cpBeforePush.ClientSeq + 1
+	for _, cn := range reqPack.Changes {
+		if cn.ID().ClientSeq() <= cpBeforePush.ClientSeq {
+			continue
+		}
+
+		if cn.ID().ClientSeq() != expectedClientSeq {
+			return connect.NewError(
+				connect.CodeInvalidArgument,
+				errors.InvalidArgument("change clientSeq must increase by one").WithCode("ErrInvalidClientSeq"),
+			)
+		}
+
+		expectedClientSeq++
+	}
+
+	return nil
+}
+
+// validateChangeActors refuses a pushed change stamped with an actor the
+// pushing client row does not hold, with the ErrActorMismatch that the Watch
+// path already returns for the same compare (yorkie_server.go Watch, "so a
+// client cannot subscribe under another client's presence identity"). Without
+// it a change stored under another client's actor is applied by every peer,
+// with presence keyed on that actor, while the owner's pull drops it as its own
+// echo (pullChangeInfos, IsOwnActor) and never converges (#2120).
+//
+// What the compare establishes: a peer learns a collaborator's actor off the
+// wire — every pulled change carries it — but not the client_id or client key
+// behind it, since StableActorID is a digest of (project, client key) with no
+// preimage. Stamping a foreign actor is therefore the one identity move a
+// plain collaborator can make, and it is what this refuses. What it does not
+// establish: client_id is not a credential, so a caller that already holds a
+// victim's identifier resolves a clientInfo for which the victim's actor is
+// its own; and two honest sessions of one client key share a stable actor by
+// design, so they are indistinguishable here. Those remain open and need an
+// authenticated client identity, tracked in #2114.
+//
+// Only changes the server would store (clientSeq above the checkpoint) are
+// checked; pushPack drops the others. The initial actor is accepted: it is the
+// documented value of a pre-attach edit in a client that skipped SetActor and
+// of the tickets a declined re-issue leaves behind (see
+// docs/design/pre-attach-ticket-reissue.md), and it is no client's own actor on
+// pull, so a change stamped with it reaches every client and suppresses none.
+// The server's own writers hold it as their session id (IsServerClient), so
+// IsOwnActor accepts them regardless.
+//
+// Only the change ID is refused on, which is what both the pull dedup
+// (ChangeInfo.ActorID) and the presence keying read. An operation's executedAt
+// ticket keeps the actor it was minted under, which a declined re-issue
+// legitimately leaves behind, so a mismatch there is logged instead.
+func validateChangeActors(
+	ctx context.Context,
+	clientInfo *database.ClientInfo,
+	cpBeforePush change.Checkpoint,
+	docKey types.DocRefKey,
+	reqPack *change.Pack,
+) error {
+	foreign := func(actorID time.ActorID) bool {
+		return actorID != time.InitialActorID && !clientInfo.IsOwnActor(types.IDFromActorID(actorID))
+	}
+
+	for _, cn := range reqPack.Changes {
+		if cn.ID().ClientSeq() <= cpBeforePush.ClientSeq {
+			continue
+		}
+
+		if foreign(cn.ID().ActorID()) {
+			return clients.ErrActorMismatch
+		}
+
+		for _, op := range cn.Operations() {
+			executedAt := op.ExecutedAt()
+			if executedAt == nil || !foreign(executedAt.ActorID()) {
+				continue
+			}
+
+			logging.From(ctx).Warnf(
+				"foreign actor in pushed operation: doc(%s), client(%s), clientSeq(%d), actor(%s)",
+				docKey.DocID, clientInfo.ID, cn.ID().ClientSeq(), executedAt.ActorID(),
+			)
+			break
+		}
+	}
+
+	return nil
+}
+
+// pushPack pushes the given ChangePack to the database. maxSize is the
+// project's MaxSizePerDocument, and statusChange marks a pack that detaches or
+// removes the document, which must always go through.
+func pushPack(
+	ctx context.Context,
+	be *backend.Backend,
+	clientInfo *database.ClientInfo,
+	docKey types.DocRefKey,
+	reqPack *change.Pack,
+	maxSize int,
+	statusChange bool,
+) ([]*database.ChangeInfo, *database.DocInfo, int64, change.Checkpoint, error) {
+	cpBeforePush := clientInfo.Checkpoint(docKey.DocID)
+
+	// 01. Filter out changes that are already pushed.
+	var pushables []*database.ChangeInfo
+	var pushableChanges []*change.Change
+	for _, cn := range reqPack.Changes {
+		if cn.ID().ClientSeq() <= cpBeforePush.ClientSeq {
+			logging.From(ctx).Warnf(
+				"change already pushed, clientSeq: %d, cp: %d",
+				cn.ID().ClientSeq(),
+				cpBeforePush.ClientSeq,
+			)
+			continue
+		}
+		info, err := database.NewFromChange(docKey, cn)
+		if err != nil {
+			return nil, nil, time.InitialLamport, change.InitialCheckpoint, err
+		}
+
+		pushables = append(pushables, info)
+		pushableChanges = append(pushableChanges, cn)
+	}
+
+	// 02. Push the changes to the database.
+	// NOTE(hackerwins): The lock must be acquired before the epoch check
+	// because FindDocInfoByRefKey populates the docCache. Without the lock,
+	// a concurrent goroutine's stale MongoDB read can overwrite a fresher
+	// cache entry, causing ErrConflictOnUpdate in CreateChangeInfos.
+	// ServerSeq validation also belongs here so it observes the same locked
+	// DocInfo snapshot and never runs ahead of epoch mismatch handling.
+	if len(pushables) > 0 || reqPack.IsRemoved {
+		locker := be.Lockers.Locker(DocPushKey(docKey))
+		defer locker.Unlock()
+
+		currentDocInfo, err := be.DB.FindDocInfoByRefKey(ctx, docKey)
+		if err != nil {
+			return nil, nil, time.InitialLamport, change.InitialCheckpoint, err
+		}
+
+		clientDocInfo := clientInfo.Documents[docKey.DocID]
+		epochMismatch := clientDocInfo != nil && clientDocInfo.Epoch != currentDocInfo.Epoch
+		if epochMismatch {
+			// 03. Discard stale-epoch changes before storing them.
+			// pushPack runs before preparePack. Without this check, stale-epoch
+			// changes would be inserted into the in-memory changeCache, polluting
+			// it with operations that reference pre-compaction CRDT node IDs.
+			// preparePack will return ErrEpochMismatch to the client downstream.
+			if len(pushables) > 0 {
+				logging.From(ctx).Warnf(
+					"discarding %d changes from stale epoch: client(%d) != doc(%d)",
+					len(pushables),
+					clientDocInfo.Epoch,
+					currentDocInfo.Epoch,
+				)
+				pushables = nil
+			}
+		} else if reqPack.Checkpoint.ServerSeq > currentDocInfo.ServerSeq {
+			return nil, nil, time.InitialLamport, change.InitialCheckpoint, connect.NewError(
+				connect.CodeInvalidArgument,
+				errors.InvalidArgument("checkpoint serverSeq exceeds server state").WithCode("ErrInvalidServerSeq"),
+			)
+		}
+
+		// 04. Enforce MaxSizePerDocument. A detach or remove still goes
+		// through, so a client is never stuck on an over-quota document, but
+		// its changes are discarded when they would grow the document:
+		// otherwise attach, push in the detach pack and re-attach would walk
+		// around the gate.
+		if len(pushables) > 0 {
+			if err := checkDocumentSize(
+				ctx, be, docKey, currentDocInfo.ServerSeq, maxSize, pushableChanges,
+			); err != nil {
+				if !statusChange || !stderrors.Is(err, document.ErrDocumentSizeExceedsLimit) {
+					return nil, nil, time.InitialLamport, change.InitialCheckpoint, err
+				}
+				logging.From(ctx).Warnf("discarding %d changes from a detach or remove: %v", len(pushables), err)
+				pushables = nil
+			}
+		}
+	}
+	docInfo, cpAfterPush, err := be.DB.CreateChangeInfos(
+		ctx,
+		docKey,
+		cpBeforePush,
+		pushables,
+		reqPack.IsRemoved,
+	)
+	if err != nil {
+		return nil, nil, time.InitialLamport, change.InitialCheckpoint, err
+	}
+
+	initialSeq := docInfo.ServerSeq - int64(len(pushables))
+	if len(reqPack.Changes) > 0 {
+		logging.From(ctx).Debugf(
+			"PUSH: '%s' pushes %d changes into '%s', rejected %d changes, serverSeq: %d -> %d, cp: %s",
+			clientInfo.Key,
+			len(pushables),
+			docInfo.Key,
+			len(reqPack.Changes)-len(pushables),
+			initialSeq,
+			docInfo.ServerSeq,
+			cpAfterPush,
+		)
+	}
+
+	return pushables, docInfo, initialSeq, cpAfterPush, nil
+}
+
+func pullPack(
+	ctx context.Context,
+	be *backend.Backend,
+	clientInfo *database.ClientInfo,
+	snapshotThreshold int64,
+	docInfo *database.DocInfo,
+	reqPack *change.Pack,
+	cpAfterPush change.Checkpoint,
+	initialSeq int64,
+	opts PushPullOptions,
+) (*ServerPack, error) {
+	// 01. pull changes or a snapshot from the database and create a response pack.
+	resPack, err := preparePack(ctx, be, clientInfo, snapshotThreshold,
+		docInfo, reqPack, cpAfterPush, initialSeq, opts)
+
+	if err != nil {
+		// NOTE(hackerwins): When a client detaches after a compaction, the epoch
+		// mismatch makes change sync impossible. But detach only needs to update
+		// the client's status — syncing old-epoch changes is meaningless. So we
+		// skip the pull and return an empty pack to let the detach proceed.
+		isDetachOrRemove := opts.Status == document.StatusDetached ||
+			opts.Status == document.StatusRemoved
+		if stderrors.Is(err, ErrEpochMismatch) && isDetachOrRemove {
+			resPack = NewServerPack(docInfo.Key, change.Checkpoint{
+				ServerSeq: reqPack.Checkpoint.ServerSeq,
+				ClientSeq: cpAfterPush.ClientSeq,
+			}, nil, nil)
+		} else {
+			return nil, err
+		}
+	}
+	resPack.ApplyDocInfo(docInfo)
+
+	// 02. update the document's status in the client.
+	if err := clientInfo.UpdateDocStatus(docInfo.ID, opts.Status, resPack.Checkpoint); err != nil {
+		return nil, err
+	}
+
+	// 03. update client's vector and checkpoint to DB.
+	// Skip both minVV tracking and response VV when this PushPull is
+	// flagged as GC-free. The client never consumes the response VV for
+	// tombstone GC, and excluding it from minVV is correct because
+	// tombstones do not need to be kept alive for this client. See
+	// docs/design/disable-gc-on-attach.md.
+	if opts.DisableGC {
+		if resPack.SnapshotLen() > 0 {
+			// Snapshot pulls must still carry the doc's max lamport so the
+			// opt-out client's change clock catches up; otherwise its
+			// subsequent local Changes are produced with ticks far behind
+			// the server's actual state. Truncate the full VV that
+			// pullSnapshot populated down to a single entry keyed by the
+			// requesting client's own actor: this preserves lamport
+			// progression via SetClocks while keeping the size-1 invariant
+			// the opt-out client maintains. Key on OwnActorID
+			// (StableActorID for new SDKs) so the entry matches the actor
+			// the client stamps into its own changes; otherwise its
+			// SetClocks would write the lamport under the wrong actor and its
+			// local clock would not advance.
+			actorID, err := clientInfo.OwnActorID()
+			if err != nil {
+				return nil, err
+			}
+			maxLamport := resPack.VersionVector.MaxLamport()
+			resPack.VersionVector = time.VersionVector{actorID: maxLamport}
+		} else {
+			// Change pulls do not need a pack-level lamport hint: each
+			// Change.ID carries its own lamport that the client uses
+			// directly via SyncLamport.
+			resPack.VersionVector = nil
+		}
+	} else {
+		minVersionVector, err := be.DB.UpdateMinVersionVector(ctx, clientInfo, docInfo.RefKey(), reqPack.VersionVector)
+		if err != nil {
+			return nil, err
+		}
+		// Attach the vector only to a reply the client may collect with: one
+		// that carries the changes the vector already accounts for. A snapshot
+		// reply was collected server-side and carries the document's own
+		// vector instead. A push-only reply pulls nothing, so the client has
+		// not applied those remote changes; collecting with it would purge the
+		// tombstones they anchor on and leave every retry of the next full
+		// pull unable to apply them ("node not found"). That pull's reply
+		// carries the vector, after its changes. See
+		// docs/design/garbage-collection.md.
+		if resPack.SnapshotLen() == 0 && opts.Mode != types.SyncModePushOnly {
+			resPack.VersionVector = minVersionVector
+		}
+	}
+	if !clientInfo.IsServerClient() {
+		if err := be.DB.UpdateClientInfoAfterPushPull(ctx, clientInfo, docInfo); err != nil {
+			return nil, err
+		}
+	}
+
+	return resPack, nil
+}
+
+// preparePack prepares the response pack for the given request pack.
+func preparePack(
+	ctx context.Context,
+	be *backend.Backend,
+	clientInfo *database.ClientInfo,
+	snapshotThreshold int64,
+	docInfo *database.DocInfo,
+	reqPack *change.Pack,
+	cpAfterPush change.Checkpoint,
+	initialServerSeq int64,
+	opts PushPullOptions,
+) (*ServerPack, error) {
+	// NOTE(hackerwins): If the client is push-only, it does not need to pull changes.
+	// So, just return the checkpoint with server seq after pushing changes.
+	if opts.Mode == types.SyncModePushOnly {
+		return NewServerPack(docInfo.Key, change.Checkpoint{
+			ServerSeq: reqPack.Checkpoint.ServerSeq,
+			ClientSeq: cpAfterPush.ClientSeq,
+		}, nil, nil), nil
+	}
+
+	// Compare epochs first: if the document has been compacted since the
+	// client last synced, serverSeq values from different epochs cannot
+	// be compared.
+	if clientDocInfo := clientInfo.Documents[docInfo.ID]; clientDocInfo != nil && clientDocInfo.Epoch != docInfo.Epoch {
+		return nil, fmt.Errorf(
+			"client epoch(%d) != document epoch(%d): %w",
+			clientDocInfo.Epoch,
+			docInfo.Epoch,
+			ErrEpochMismatch,
+		)
+	}
+
+	if initialServerSeq < reqPack.Checkpoint.ServerSeq {
+		return nil, errors.InvalidArgument(
+			"checkpoint serverSeq exceeds server state",
+		).WithCode("ErrInvalidServerSeq")
+	}
+
+	// Pull changes from DB if the size of changes for the response is less than the snapshot threshold.
+	if initialServerSeq-reqPack.Checkpoint.ServerSeq < snapshotThreshold {
+		cpAfterPull, pulledChanges, err := pullChangeInfos(
+			ctx,
+			be,
+			clientInfo,
+			docInfo,
+			reqPack,
+			cpAfterPush,
+			initialServerSeq,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		return NewServerPack(docInfo.Key, cpAfterPull, pulledChanges, nil), nil
+	}
+
+	// NOTE(hackerwins): If the size of changes for the response is greater than the snapshot threshold,
+	// we pull the snapshot from DB to reduce the size of the response.
+	return pullSnapshot(ctx, be, clientInfo, docInfo, reqPack, cpAfterPush, initialServerSeq, opts)
+}
+
+// pullSnapshot pulls the snapshot from DB.
+func pullSnapshot(
+	ctx context.Context,
+	be *backend.Backend,
+	clientInfo *database.ClientInfo,
+	docInfo *database.DocInfo,
+	reqPack *change.Pack,
+	cpAfterPush change.Checkpoint,
+	initialServerSeq int64,
+	opts PushPullOptions,
+) (*ServerPack, error) {
+	doc, err := BuildInternalDocForServerSeq(ctx, be, docInfo, initialServerSeq)
+	if err != nil {
+		return nil, err
+	}
+
+	// NOTE(hackerwins): If the client has pushed changes, we need to apply the
+	// changes to the document to build the snapshot with the changes.
+	if reqPack.HasChanges() {
+		if err := doc.ApplyChangePack(change.NewPack(
+			docInfo.Key,
+			doc.Checkpoint().NextServerSeq(docInfo.ServerSeq),
+			reqPack.Changes,
+			nil,
+			nil,
+		), be.Config.SnapshotDisableGC); err != nil {
+			return nil, err
+		}
+	}
+
+	cpAfterPull := cpAfterPush.NextServerSeq(docInfo.ServerSeq)
+
+	if !be.Config.SnapshotDisableGC {
+		vector, err := be.DB.GetMinVersionVector(ctx, docInfo.RefKey(), doc.VersionVector())
+		if err != nil {
+			return nil, err
+		}
+		if _, err := doc.GarbageCollect(vector); err != nil {
+			return nil, err
+		}
+	}
+
+	// Belt-and-suspenders for presenceless documents: clear the in-memory
+	// presence map so any downstream branch sees no cached entries, and
+	// pass a nil presence map into SnapshotToBytes so the wire bytes carry
+	// an empty map regardless of what the doc has accumulated.
+	presences := doc.AllPresences()
+	if opts.DisablePresence {
+		doc.ResetPresences()
+		presences = nil
+	}
+
+	snapshot, err := converter.SnapshotToBytes(doc.RootObject(), presences)
+	if err != nil {
+		return nil, err
+	}
+
+	logging.From(ctx).Debugf(
+		"PULL: '%s' build snapshot with changes(%d~%d) from '%s', cp: %s",
+		clientInfo.Key,
+		reqPack.Checkpoint.ServerSeq+1,
+		initialServerSeq,
+		docInfo.Key,
+		cpAfterPull,
+	)
+
+	pack := NewServerPack(docInfo.Key, cpAfterPull, nil, snapshot)
+	pack.VersionVector = doc.VersionVector()
+	return pack, nil
+}
+
+func pullChangeInfos(
+	ctx context.Context,
+	be *backend.Backend,
+	clientInfo *database.ClientInfo,
+	docInfo *database.DocInfo,
+	reqPack *change.Pack,
+	cpAfterPush change.Checkpoint,
+	initialServerSeq int64,
+) (change.Checkpoint, []*database.ChangeInfo, error) {
+	pulledChanges, err := be.DB.FindChangeInfosBetweenServerSeqs(
+		ctx,
+		docInfo.RefKey(),
+		reqPack.Checkpoint.ServerSeq+1,
+		initialServerSeq,
+	)
+	if err != nil {
+		return change.InitialCheckpoint, nil, err
+	}
+
+	// NOTE(hackerwins, humdrum): Remove changes from the pulled if the client already has them.
+	// This could happen when the client has pushed changes and the server receives the changes
+	// and stores them in the DB, but fails to send the response to the client.
+	// And it could also happen when the client sync with push-only mode and then sync with pull mode.
+	//
+	// See the following test case for more details:
+	//   "sync option with mixed mode test" in integration/client_test.go
+	var filteredChanges []*database.ChangeInfo
+	for _, pulledChange := range pulledChanges {
+		// Recognize the change as this client's own via compare-both: old SDKs
+		// stamp the per-session ID, new SDKs stamp the StableActorID. Both must
+		// dedup, or a stable-actor client's own changes echo back and re-apply
+		// (non-idempotent ops double-count).
+		if clientInfo.IsOwnActor(pulledChange.ActorID) && cpAfterPush.ClientSeq >= pulledChange.ClientSeq {
+			continue
+		}
+
+		// Defensive: drop any stray presence from cached or older rows on
+		// the way to the wire. Strip on a clone so the cache's shared
+		// pointer stays untouched, and drop the change entirely if the
+		// strip leaves it carrying no operations.
+		if docInfo.DisablePresence && pulledChange.PresenceChange != nil {
+			pulledChange = pulledChange.DeepCopy()
+			pulledChange.PresenceChange = nil
+			if !pulledChange.HasOperations() {
+				continue
+			}
+		}
+
+		filteredChanges = append(filteredChanges, pulledChange)
+	}
+
+	cpAfterPull := cpAfterPush.NextServerSeq(docInfo.ServerSeq)
+
+	if len(pulledChanges) > 0 {
+		logging.From(ctx).Debugf(
+			"PULL: '%s' pulls %d changes(%d~%d) from '%s', cp: %s, filtered changes: %d",
+			clientInfo.Key,
+			len(pulledChanges),
+			pulledChanges[0].ServerSeq,
+			pulledChanges[len(pulledChanges)-1].ServerSeq,
+			docInfo.Key,
+			cpAfterPull,
+			len(filteredChanges),
+		)
+	}
+
+	return cpAfterPull, filteredChanges, nil
+}

@@ -1,0 +1,3142 @@
+openapi: 3.1.0
+info:
+  description: Yorkie is an open source document store for building collaborative
+    editing applications.
+  title: Yorkie
+  version: v0.7.25
+servers:
+- description: Production server
+  url: https://api.yorkie.dev
+- description: Local server
+  url: http://localhost:8080
+paths:
+  /yorkie.v1.YorkieService/ActivateClient:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.ActivateClient.yorkie.v1.ActivateClientRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.ActivateClient.yorkie.v1.ActivateClientResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/AttachChannel:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.AttachChannel.yorkie.v1.AttachChannelRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.AttachChannel.yorkie.v1.AttachChannelResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/AttachDocument:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.AttachDocument.yorkie.v1.AttachDocumentRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.AttachDocument.yorkie.v1.AttachDocumentResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/Broadcast:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.Broadcast.yorkie.v1.BroadcastRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.Broadcast.yorkie.v1.BroadcastResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/CreateRevision:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.CreateRevision.yorkie.v1.CreateRevisionRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.CreateRevision.yorkie.v1.CreateRevisionResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/DeactivateClient:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.DeactivateClient.yorkie.v1.DeactivateClientRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.DeactivateClient.yorkie.v1.DeactivateClientResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/DetachChannel:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.DetachChannel.yorkie.v1.DetachChannelRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.DetachChannel.yorkie.v1.DetachChannelResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/DetachDocument:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.DetachDocument.yorkie.v1.DetachDocumentRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.DetachDocument.yorkie.v1.DetachDocumentResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/GetRevision:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.GetRevision.yorkie.v1.GetRevisionRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.GetRevision.yorkie.v1.GetRevisionResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/ListRevisions:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.ListRevisions.yorkie.v1.ListRevisionsRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.ListRevisions.yorkie.v1.ListRevisionsResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/PeekChannel:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.PeekChannel.yorkie.v1.PeekChannelRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.PeekChannel.yorkie.v1.PeekChannelResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/PushPullChanges:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.PushPullChanges.yorkie.v1.PushPullChangesRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.PushPullChanges.yorkie.v1.PushPullChangesResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/RefreshChannel:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.RefreshChannel.yorkie.v1.RefreshChannelRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.RefreshChannel.yorkie.v1.RefreshChannelResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/RemoveDocument:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.RemoveDocument.yorkie.v1.RemoveDocumentRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.RemoveDocument.yorkie.v1.RemoveDocumentResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/RestoreRevision:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.RestoreRevision.yorkie.v1.RestoreRevisionRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.RestoreRevision.yorkie.v1.RestoreRevisionResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/Watch:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.Watch.yorkie.v1.WatchRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.Watch.yorkie.v1.WatchResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/WatchChannel:
+    post:
+      description: 'Deprecated: Use Watch with ResourceDescriptor instead.'
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.WatchChannel.yorkie.v1.WatchChannelRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.WatchChannel.yorkie.v1.WatchChannelResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+  /yorkie.v1.YorkieService/WatchDocument:
+    post:
+      description: 'Deprecated: Use Watch with ResourceDescriptor instead.'
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.YorkieService.WatchDocument.yorkie.v1.WatchDocumentRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.YorkieService.WatchDocument.yorkie.v1.WatchDocumentResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.YorkieService
+components:
+  requestBodies:
+    yorkie.v1.YorkieService.ActivateClient.yorkie.v1.ActivateClientRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ActivateClientRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ActivateClientRequest'
+      required: true
+    yorkie.v1.YorkieService.AttachChannel.yorkie.v1.AttachChannelRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.AttachChannelRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.AttachChannelRequest'
+      required: true
+    yorkie.v1.YorkieService.AttachDocument.yorkie.v1.AttachDocumentRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.AttachDocumentRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.AttachDocumentRequest'
+      required: true
+    yorkie.v1.YorkieService.Broadcast.yorkie.v1.BroadcastRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.BroadcastRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.BroadcastRequest'
+      required: true
+    yorkie.v1.YorkieService.CreateRevision.yorkie.v1.CreateRevisionRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.CreateRevisionRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.CreateRevisionRequest'
+      required: true
+    yorkie.v1.YorkieService.DeactivateClient.yorkie.v1.DeactivateClientRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DeactivateClientRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DeactivateClientRequest'
+      required: true
+    yorkie.v1.YorkieService.DetachChannel.yorkie.v1.DetachChannelRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DetachChannelRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DetachChannelRequest'
+      required: true
+    yorkie.v1.YorkieService.DetachDocument.yorkie.v1.DetachDocumentRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DetachDocumentRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DetachDocumentRequest'
+      required: true
+    yorkie.v1.YorkieService.GetRevision.yorkie.v1.GetRevisionRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.GetRevisionRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.GetRevisionRequest'
+      required: true
+    yorkie.v1.YorkieService.ListRevisions.yorkie.v1.ListRevisionsRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ListRevisionsRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ListRevisionsRequest'
+      required: true
+    yorkie.v1.YorkieService.PeekChannel.yorkie.v1.PeekChannelRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.PeekChannelRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.PeekChannelRequest'
+      required: true
+    yorkie.v1.YorkieService.PushPullChanges.yorkie.v1.PushPullChangesRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.PushPullChangesRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.PushPullChangesRequest'
+      required: true
+    yorkie.v1.YorkieService.RefreshChannel.yorkie.v1.RefreshChannelRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RefreshChannelRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RefreshChannelRequest'
+      required: true
+    yorkie.v1.YorkieService.RemoveDocument.yorkie.v1.RemoveDocumentRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RemoveDocumentRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RemoveDocumentRequest'
+      required: true
+    yorkie.v1.YorkieService.RestoreRevision.yorkie.v1.RestoreRevisionRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RestoreRevisionRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RestoreRevisionRequest'
+      required: true
+    yorkie.v1.YorkieService.Watch.yorkie.v1.WatchRequest:
+      content: {}
+      required: true
+    yorkie.v1.YorkieService.WatchChannel.yorkie.v1.WatchChannelRequest:
+      content: {}
+      required: true
+    yorkie.v1.YorkieService.WatchDocument.yorkie.v1.WatchDocumentRequest:
+      content: {}
+      required: true
+  responses:
+    connect.error:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/connect.error'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/connect.error'
+      description: ""
+    yorkie.v1.YorkieService.ActivateClient.yorkie.v1.ActivateClientResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ActivateClientResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ActivateClientResponse'
+      description: ""
+    yorkie.v1.YorkieService.AttachChannel.yorkie.v1.AttachChannelResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.AttachChannelResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.AttachChannelResponse'
+      description: ""
+    yorkie.v1.YorkieService.AttachDocument.yorkie.v1.AttachDocumentResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.AttachDocumentResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.AttachDocumentResponse'
+      description: ""
+    yorkie.v1.YorkieService.Broadcast.yorkie.v1.BroadcastResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.BroadcastResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.BroadcastResponse'
+      description: ""
+    yorkie.v1.YorkieService.CreateRevision.yorkie.v1.CreateRevisionResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.CreateRevisionResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.CreateRevisionResponse'
+      description: ""
+    yorkie.v1.YorkieService.DeactivateClient.yorkie.v1.DeactivateClientResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DeactivateClientResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DeactivateClientResponse'
+      description: ""
+    yorkie.v1.YorkieService.DetachChannel.yorkie.v1.DetachChannelResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DetachChannelResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DetachChannelResponse'
+      description: ""
+    yorkie.v1.YorkieService.DetachDocument.yorkie.v1.DetachDocumentResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DetachDocumentResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.DetachDocumentResponse'
+      description: ""
+    yorkie.v1.YorkieService.GetRevision.yorkie.v1.GetRevisionResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.GetRevisionResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.GetRevisionResponse'
+      description: ""
+    yorkie.v1.YorkieService.ListRevisions.yorkie.v1.ListRevisionsResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ListRevisionsResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ListRevisionsResponse'
+      description: ""
+    yorkie.v1.YorkieService.PeekChannel.yorkie.v1.PeekChannelResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.PeekChannelResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.PeekChannelResponse'
+      description: ""
+    yorkie.v1.YorkieService.PushPullChanges.yorkie.v1.PushPullChangesResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.PushPullChangesResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.PushPullChangesResponse'
+      description: ""
+    yorkie.v1.YorkieService.RefreshChannel.yorkie.v1.RefreshChannelResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RefreshChannelResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RefreshChannelResponse'
+      description: ""
+    yorkie.v1.YorkieService.RemoveDocument.yorkie.v1.RemoveDocumentResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RemoveDocumentResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RemoveDocumentResponse'
+      description: ""
+    yorkie.v1.YorkieService.RestoreRevision.yorkie.v1.RestoreRevisionResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RestoreRevisionResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.RestoreRevisionResponse'
+      description: ""
+    yorkie.v1.YorkieService.Watch.yorkie.v1.WatchResponse:
+      description: ""
+    yorkie.v1.YorkieService.WatchChannel.yorkie.v1.WatchChannelResponse:
+      description: ""
+    yorkie.v1.YorkieService.WatchDocument.yorkie.v1.WatchDocumentResponse:
+      description: ""
+  schemas:
+    connect.error:
+      additionalProperties: false
+      description: 'Error type returned by Connect: https://connectrpc.com/docs/go/errors/#http-representation'
+      properties:
+        code:
+          enum:
+          - CodeCanceled
+          - CodeUnknown
+          - CodeInvalidArgument
+          - CodeDeadlineExceeded
+          - CodeNotFound
+          - CodeAlreadyExists
+          - CodePermissionDenied
+          - CodeResourceExhausted
+          - CodeFailedPrecondition
+          - CodeAborted
+          - CodeOutOfRange
+          - CodeInternal
+          - CodeUnavailable
+          - CodeDataLoss
+          - CodeUnauthenticated
+          examples:
+          - CodeNotFound
+          type: string
+        message:
+          type: string
+      title: Connect Error
+      type: object
+    google.protobuf.Timestamp:
+      additionalProperties: false
+      description: |-
+        A Timestamp represents a point in time independent of any time zone or local
+         calendar, encoded as a count of seconds and fractions of seconds at
+         nanosecond resolution. The count is relative to an epoch at UTC midnight on
+         January 1, 1970, in the proleptic Gregorian calendar which extends the
+         Gregorian calendar backwards to year one.
+
+         All minutes are 60 seconds long. Leap seconds are "smeared" so that no leap
+         second table is needed for interpretation, using a [24-hour linear
+         smear](https://developers.google.com/time/smear).
+
+         The range is from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59.999999999Z. By
+         restricting to that range, we ensure that we can convert to and from [RFC
+         3339](https://www.ietf.org/rfc/rfc3339.txt) date strings.
+
+         # Examples
+
+         Example 1: Compute Timestamp from POSIX `time()`.
+
+             Timestamp timestamp;
+             timestamp.set_seconds(time(NULL));
+             timestamp.set_nanos(0);
+
+         Example 2: Compute Timestamp from POSIX `gettimeofday()`.
+
+             struct timeval tv;
+             gettimeofday(&tv, NULL);
+
+             Timestamp timestamp;
+             timestamp.set_seconds(tv.tv_sec);
+             timestamp.set_nanos(tv.tv_usec * 1000);
+
+         Example 3: Compute Timestamp from Win32 `GetSystemTimeAsFileTime()`.
+
+             FILETIME ft;
+             GetSystemTimeAsFileTime(&ft);
+             UINT64 ticks = (((UINT64)ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+
+             // A Windows tick is 100 nanoseconds. Windows epoch 1601-01-01T00:00:00Z
+             // is 11644473600 seconds before Unix epoch 1970-01-01T00:00:00Z.
+             Timestamp timestamp;
+             timestamp.set_seconds((INT64) ((ticks / 10000000) - 11644473600LL));
+             timestamp.set_nanos((INT32) ((ticks % 10000000) * 100));
+
+         Example 4: Compute Timestamp from Java `System.currentTimeMillis()`.
+
+             long millis = System.currentTimeMillis();
+
+             Timestamp timestamp = Timestamp.newBuilder().setSeconds(millis / 1000)
+                 .setNanos((int) ((millis % 1000) * 1000000)).build();
+
+         Example 5: Compute Timestamp from Java `Instant.now()`.
+
+             Instant now = Instant.now();
+
+             Timestamp timestamp =
+                 Timestamp.newBuilder().setSeconds(now.getEpochSecond())
+                     .setNanos(now.getNano()).build();
+
+         Example 6: Compute Timestamp from current time in Python.
+
+             timestamp = Timestamp()
+             timestamp.GetCurrentTime()
+
+         # JSON Mapping
+
+         In JSON format, the Timestamp type is encoded as a string in the
+         [RFC 3339](https://www.ietf.org/rfc/rfc3339.txt) format. That is, the
+         format is "{year}-{month}-{day}T{hour}:{min}:{sec}[.{frac_sec}]Z"
+         where {year} is always expressed using four digits while {month}, {day},
+         {hour}, {min}, and {sec} are zero-padded to two digits each. The fractional
+         seconds, which can go up to 9 digits (i.e. up to 1 nanosecond resolution),
+         are optional. The "Z" suffix indicates the timezone ("UTC"); the timezone
+         is required. A proto3 JSON serializer should always use UTC (as indicated by
+         "Z") when printing the Timestamp type and a proto3 JSON parser should be
+         able to accept both UTC and other timezones (as indicated by an offset).
+
+         For example, "2017-01-15T01:30:15.01Z" encodes 15.01 seconds past
+         01:30 UTC on January 15, 2017.
+
+         In JavaScript, one can convert a Date object to this format using the
+         standard
+         [toISOString()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toISOString)
+         method. In Python, a standard `datetime.datetime` object can be converted
+         to this format using
+         [`strftime`](https://docs.python.org/2/library/time.html#time.strftime) with
+         the time format spec '%Y-%m-%dT%H:%M:%S.%fZ'. Likewise, in Java, one can use
+         the Joda Time's [`ISODateTimeFormat.dateTime()`](
+         http://joda-time.sourceforge.net/apidocs/org/joda/time/format/ISODateTimeFormat.html#dateTime()
+         ) to obtain a formatter capable of generating timestamps in this format.
+      format: date-time
+      type: string
+    yorkie.v1.ActivateClientRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientKey:
+          additionalProperties: false
+          description: ""
+          title: client_key
+          type: string
+        metadata:
+          additionalProperties: false
+          description: ""
+          title: metadata
+          type: object
+      title: ActivateClientRequest
+      type: object
+    yorkie.v1.ActivateClientRequest.MetadataEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: MetadataEntry
+      type: object
+    yorkie.v1.ActivateClientResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        actorId:
+          additionalProperties: false
+          description: |-
+            actor_id is the stable actor derived from the project and client key.
+             Opted-in SDKs stamp it into changes; old SDKs ignore it and keep using
+             client_id as their actor.
+          title: actor_id
+          type: string
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+      title: ActivateClientResponse
+      type: object
+    yorkie.v1.AttachChannelRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+      title: AttachChannelRequest
+      type: object
+    yorkie.v1.AttachChannelResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: session_count
+        sessionId:
+          additionalProperties: false
+          description: ""
+          title: session_id
+          type: string
+      title: AttachChannelResponse
+      type: object
+    yorkie.v1.AttachDocumentRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        changePack:
+          $ref: '#/components/schemas/yorkie.v1.ChangePack'
+          additionalProperties: false
+          description: ""
+          title: change_pack
+          type: object
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        disableGc:
+          additionalProperties: false
+          description: |-
+            disable_gc declares that this attachment will not produce or consume
+             tombstones. The server skips minVV tracking and omits the response
+             VersionVector for this client. Use only with Counter / primitive
+             workloads; misuse leads to undefined GC behavior on this client.
+          title: disable_gc
+          type: boolean
+        disablePresence:
+          additionalProperties: false
+          description: |-
+            disable_presence declares that this document does not produce, consume,
+             or store presence. Honored on first attach only; subsequent attaches
+             observe the value persisted in the server-side document metadata. See
+             docs/tasks/active/20260616-presenceless-document-option-todo.md.
+          title: disable_presence
+          type: boolean
+        schemaKey:
+          additionalProperties: false
+          description: ""
+          title: schema_key
+          type: string
+      title: AttachDocumentRequest
+      type: object
+    yorkie.v1.AttachDocumentResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        changePack:
+          $ref: '#/components/schemas/yorkie.v1.ChangePack'
+          additionalProperties: false
+          description: ""
+          title: change_pack
+          type: object
+        disablePresence:
+          additionalProperties: false
+          description: |-
+            disable_presence carries the server-fixated value of the document's
+             presence option (see AttachDocumentRequest.disable_presence). Clients
+             align their local gating state to this value rather than the requested
+             value, so an attach to an already-fixated document observes the
+             persisted decision.
+          title: disable_presence
+          type: boolean
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        maxSizePerDocument:
+          additionalProperties: false
+          description: ""
+          title: max_size_per_document
+          type: integer
+        schemaRules:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.Rule'
+            type: object
+          title: schema_rules
+          type: array
+      title: AttachDocumentResponse
+      type: object
+    yorkie.v1.BroadcastRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        payload:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: payload
+          type: string
+        topic:
+          additionalProperties: false
+          description: ""
+          title: topic
+          type: string
+      title: BroadcastRequest
+      type: object
+    yorkie.v1.BroadcastResponse:
+      additionalProperties: false
+      description: ""
+      title: BroadcastResponse
+      type: object
+    yorkie.v1.Change:
+      additionalProperties: false
+      description: ""
+      properties:
+        id:
+          $ref: '#/components/schemas/yorkie.v1.ChangeID'
+          additionalProperties: false
+          description: ""
+          title: id
+          type: object
+        message:
+          additionalProperties: false
+          description: ""
+          title: message
+          type: string
+        operations:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.Operation'
+            type: object
+          title: operations
+          type: array
+        presenceChange:
+          $ref: '#/components/schemas/yorkie.v1.PresenceChange'
+          additionalProperties: false
+          description: ""
+          title: presence_change
+          type: object
+      title: Change
+      type: object
+    yorkie.v1.ChangeID:
+      additionalProperties: false
+      description: ""
+      properties:
+        actorId:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: actor_id
+          type: string
+        clientSeq:
+          additionalProperties: false
+          description: ""
+          title: client_seq
+          type: integer
+        lamport:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: lamport
+        serverSeq:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: server_seq
+        versionVector:
+          $ref: '#/components/schemas/yorkie.v1.VersionVector'
+          additionalProperties: false
+          description: ""
+          title: version_vector
+          type: object
+      title: ChangeID
+      type: object
+    yorkie.v1.ChangePack:
+      additionalProperties: false
+      description: |-
+        ChangePack is a message that contains all changes that occurred in a document.
+         It is used to synchronize changes between clients and servers.
+      properties:
+        capabilities:
+          additionalProperties: false
+          description: |-
+            capabilities is the negotiation channel for wire features a peer may not
+             understand. A server sets it on the pack it returns to advertise what it
+             supports; a client must treat absence as "unsupported" rather than as
+             "unknown", because a server that predates a feature cannot say so.
+
+             It exists because a server does not store the bytes a client sent: it
+             re-encodes from its own domain model, so a field it does not know is
+             dropped from the stored change log and the push still succeeds. Without a
+             handshake a client cannot tell that its restore was silently downgraded to
+             an ordinary insert. Measured against a pinned v0.7.20 server.
+          items:
+            type: string
+          title: capabilities
+          type: array
+        changes:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.Change'
+            type: object
+          title: changes
+          type: array
+        checkpoint:
+          $ref: '#/components/schemas/yorkie.v1.Checkpoint'
+          additionalProperties: false
+          description: ""
+          title: checkpoint
+          type: object
+        documentKey:
+          additionalProperties: false
+          description: ""
+          title: document_key
+          type: string
+        epoch:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: epoch
+        isRemoved:
+          additionalProperties: false
+          description: ""
+          title: is_removed
+          type: boolean
+        minSyncedTicket:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: |-
+            min_synced_ticket is superseded by version_vector and is written by no
+             SDK and read by no server. It stays declared rather than `reserved`
+             because the repository gates proto changes on buf's FILE category, whose
+             FIELD_NO_DELETE fires on a removed number even when it is reserved.
+          title: min_synced_ticket
+          type: object
+        snapshot:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: snapshot
+          type: string
+        versionVector:
+          $ref: '#/components/schemas/yorkie.v1.VersionVector'
+          additionalProperties: false
+          description: ""
+          title: version_vector
+          type: object
+      title: ChangePack
+      type: object
+    yorkie.v1.ChannelDescriptor:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+      title: ChannelDescriptor
+      type: object
+    yorkie.v1.ChannelEvent:
+      additionalProperties: false
+      description: ""
+      properties:
+        payload:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: payload
+          type: string
+        publisher:
+          additionalProperties: false
+          description: ""
+          title: publisher
+          type: string
+        seq:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: seq
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: session_count
+        topic:
+          additionalProperties: false
+          description: ""
+          title: topic
+          type: string
+        type:
+          $ref: '#/components/schemas/yorkie.v1.ChannelEvent.Type'
+          additionalProperties: false
+          description: ""
+          title: type
+      title: ChannelEvent
+      type: object
+    yorkie.v1.ChannelEvent.Type:
+      description: ""
+      enum:
+      - - TYPE_UNSPECIFIED
+        - 0
+        - TYPE_PRESENCE
+        - 1
+        - TYPE_BROADCAST
+        - 2
+      title: Type
+      type: string
+    yorkie.v1.ChannelInit:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+        seq:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: seq
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: session_count
+      title: ChannelInit
+      type: object
+    yorkie.v1.ChannelWatchEvent:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+        event:
+          $ref: '#/components/schemas/yorkie.v1.ChannelEvent'
+          additionalProperties: false
+          description: ""
+          title: event
+          type: object
+      title: ChannelWatchEvent
+      type: object
+    yorkie.v1.Checkpoint:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientSeq:
+          additionalProperties: false
+          description: ""
+          title: client_seq
+          type: integer
+        serverSeq:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: server_seq
+      title: Checkpoint
+      type: object
+    yorkie.v1.CreateRevisionRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        description:
+          additionalProperties: false
+          description: ""
+          title: description
+          type: string
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        label:
+          additionalProperties: false
+          description: ""
+          title: label
+          type: string
+      title: CreateRevisionRequest
+      type: object
+    yorkie.v1.CreateRevisionResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        revision:
+          $ref: '#/components/schemas/yorkie.v1.RevisionSummary'
+          additionalProperties: false
+          description: ""
+          title: revision
+          type: object
+      title: CreateRevisionResponse
+      type: object
+    yorkie.v1.DeactivateClientRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        synchronous:
+          additionalProperties: false
+          description: ""
+          title: synchronous
+          type: boolean
+      title: DeactivateClientRequest
+      type: object
+    yorkie.v1.DeactivateClientResponse:
+      additionalProperties: false
+      description: ""
+      title: DeactivateClientResponse
+      type: object
+    yorkie.v1.DetachChannelRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        sessionId:
+          additionalProperties: false
+          description: ""
+          title: session_id
+          type: string
+      title: DetachChannelRequest
+      type: object
+    yorkie.v1.DetachChannelResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: session_count
+      title: DetachChannelResponse
+      type: object
+    yorkie.v1.DetachDocumentRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        changePack:
+          $ref: '#/components/schemas/yorkie.v1.ChangePack'
+          additionalProperties: false
+          description: ""
+          title: change_pack
+          type: object
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        removeIfNotAttached:
+          additionalProperties: false
+          description: ""
+          title: remove_if_not_attached
+          type: boolean
+      title: DetachDocumentRequest
+      type: object
+    yorkie.v1.DetachDocumentResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        changePack:
+          $ref: '#/components/schemas/yorkie.v1.ChangePack'
+          additionalProperties: false
+          description: ""
+          title: change_pack
+          type: object
+      title: DetachDocumentResponse
+      type: object
+    yorkie.v1.DocEvent:
+      additionalProperties: false
+      description: ""
+      properties:
+        body:
+          $ref: '#/components/schemas/yorkie.v1.DocEventBody'
+          additionalProperties: false
+          description: ""
+          title: body
+          type: object
+        publisher:
+          additionalProperties: false
+          description: ""
+          title: publisher
+          type: string
+        type:
+          $ref: '#/components/schemas/yorkie.v1.DocEventType'
+          additionalProperties: false
+          description: ""
+          title: type
+      title: DocEvent
+      type: object
+    yorkie.v1.DocEventBody:
+      additionalProperties: false
+      description: ""
+      properties:
+        payload:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: payload
+          type: string
+        topic:
+          additionalProperties: false
+          description: ""
+          title: topic
+          type: string
+      title: DocEventBody
+      type: object
+    yorkie.v1.DocEventType:
+      description: ""
+      enum:
+      - - DOC_EVENT_TYPE_DOCUMENT_CHANGED
+        - 0
+        - DOC_EVENT_TYPE_DOCUMENT_WATCHED
+        - 1
+        - DOC_EVENT_TYPE_DOCUMENT_UNWATCHED
+        - 2
+        - DOC_EVENT_TYPE_DOCUMENT_BROADCAST
+        - 3
+      title: DocEventType
+      type: string
+    yorkie.v1.DocWatchEvent:
+      additionalProperties: false
+      description: ""
+      properties:
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        event:
+          $ref: '#/components/schemas/yorkie.v1.DocEvent'
+          additionalProperties: false
+          description: ""
+          title: event
+          type: object
+      title: DocWatchEvent
+      type: object
+    yorkie.v1.DocumentDescriptor:
+      additionalProperties: false
+      description: ""
+      properties:
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+      title: DocumentDescriptor
+      type: object
+    yorkie.v1.DocumentInit:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientIds:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: client_ids
+          type: array
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+      title: DocumentInit
+      type: object
+    yorkie.v1.GetRevisionRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        revisionId:
+          additionalProperties: false
+          description: ""
+          title: revision_id
+          type: string
+      title: GetRevisionRequest
+      type: object
+    yorkie.v1.GetRevisionResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        revision:
+          $ref: '#/components/schemas/yorkie.v1.RevisionSummary'
+          additionalProperties: false
+          description: ""
+          title: revision
+          type: object
+      title: GetRevisionResponse
+      type: object
+    yorkie.v1.JSONElementSimple:
+      additionalProperties: false
+      description: |-
+        JSONElementSimple is the value an operation carries: the element's identity
+         plus its encoded contents. Its moved_at and removed_at carry no lifecycle
+         state -- nothing ever wrote them, because an element reaching a replica
+         inside an operation has neither moved nor been removed yet. The snapshot
+         form, JSONElement, is where both are actually populated.
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        movedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: |-
+            Never written. See the message comment; deprecated rather than reserved
+             for the reason given on ChangePack.min_synced_ticket.
+          title: moved_at
+          type: object
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        type:
+          $ref: '#/components/schemas/yorkie.v1.ValueType'
+          additionalProperties: false
+          description: ""
+          title: type
+        value:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: value
+          type: string
+      title: JSONElementSimple
+      type: object
+    yorkie.v1.ListRevisionsRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        isForward:
+          additionalProperties: false
+          description: ""
+          title: is_forward
+          type: boolean
+        offset:
+          additionalProperties: false
+          description: ""
+          title: offset
+          type: integer
+        pageSize:
+          additionalProperties: false
+          description: ""
+          title: page_size
+          type: integer
+      title: ListRevisionsRequest
+      type: object
+    yorkie.v1.ListRevisionsResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        revisions:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.RevisionSummary'
+            type: object
+          title: revisions
+          type: array
+      title: ListRevisionsResponse
+      type: object
+    yorkie.v1.NodeAttr:
+      additionalProperties: false
+      description: ""
+      properties:
+        isRemoved:
+          additionalProperties: false
+          description: ""
+          title: is_removed
+          type: boolean
+        updatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: updated_at
+          type: object
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: NodeAttr
+      type: object
+    yorkie.v1.Operation:
+      additionalProperties: false
+      description: ""
+      properties:
+        add:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Add'
+          additionalProperties: false
+          description: ""
+          title: add
+          type: object
+        arraySet:
+          $ref: '#/components/schemas/yorkie.v1.Operation.ArraySet'
+          additionalProperties: false
+          description: ""
+          title: array_set
+          type: object
+        edit:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Edit'
+          additionalProperties: false
+          description: ""
+          title: edit
+          type: object
+        increase:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Increase'
+          additionalProperties: false
+          description: ""
+          title: increase
+          type: object
+        move:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Move'
+          additionalProperties: false
+          description: ""
+          title: move
+          type: object
+        remove:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Remove'
+          additionalProperties: false
+          description: ""
+          title: remove
+          type: object
+        set:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Set'
+          additionalProperties: false
+          description: ""
+          title: set
+          type: object
+        style:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Style'
+          additionalProperties: false
+          description: ""
+          title: style
+          type: object
+        treeEdit:
+          $ref: '#/components/schemas/yorkie.v1.Operation.TreeEdit'
+          additionalProperties: false
+          description: ""
+          title: tree_edit
+          type: object
+        treeStyle:
+          $ref: '#/components/schemas/yorkie.v1.Operation.TreeStyle'
+          additionalProperties: false
+          description: ""
+          title: tree_style
+          type: object
+      title: Operation
+      type: object
+    yorkie.v1.Operation.Add:
+      additionalProperties: false
+      description: ""
+      properties:
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        prevCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: prev_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        value:
+          $ref: '#/components/schemas/yorkie.v1.JSONElementSimple'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: Add
+      type: object
+    yorkie.v1.Operation.ArraySet:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        value:
+          $ref: '#/components/schemas/yorkie.v1.JSONElementSimple'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: ArraySet
+      type: object
+    yorkie.v1.Operation.Edit:
+      additionalProperties: false
+      description: ""
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        content:
+          additionalProperties: false
+          description: ""
+          title: content
+          type: string
+        createdAtMapByActor:
+          additionalProperties: false
+          description: |-
+            created_at_map_by_actor is superseded by the change's version vector and
+             is written by no SDK. See ChangePack.min_synced_ticket for why it is
+             deprecated rather than reserved.
+          title: created_at_map_by_actor
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        from:
+          $ref: '#/components/schemas/yorkie.v1.TextNodePos'
+          additionalProperties: false
+          description: ""
+          title: from
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        restoreSpans:
+          additionalProperties: false
+          description: identity-preserving undo/redo
+          items:
+            $ref: '#/components/schemas/yorkie.v1.RestoreSpan'
+            type: object
+          title: restore_spans
+          type: array
+        retombstoneSpans:
+          additionalProperties: false
+          description: |-
+            retombstone_spans is the companion span set for an identity-preserving
+             reverse op: restore_spans is content the reversed edit removed (to
+             revive), retombstone_spans is content it inserted (to re-remove). Both
+             are addressed by original identity so a revived neighbour keeps its
+             relative order across chained undo/redo. restore_mode selects direction.
+          items:
+            $ref: '#/components/schemas/yorkie.v1.RestoreSpan'
+            type: object
+          title: retombstone_spans
+          type: array
+        to:
+          $ref: '#/components/schemas/yorkie.v1.TextNodePos'
+          additionalProperties: false
+          description: ""
+          title: to
+          type: object
+      title: Edit
+      type: object
+    yorkie.v1.Operation.Edit.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: AttributesEntry
+      type: object
+    yorkie.v1.Operation.Edit.CreatedAtMapByActorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: CreatedAtMapByActorEntry
+      type: object
+    yorkie.v1.Operation.Increase:
+      additionalProperties: false
+      description: ""
+      properties:
+        actor:
+          additionalProperties: false
+          description: ""
+          title: actor
+          type: string
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        value:
+          $ref: '#/components/schemas/yorkie.v1.JSONElementSimple'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: Increase
+      type: object
+    yorkie.v1.Operation.Move:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        prevCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: prev_created_at
+          type: object
+      title: Move
+      type: object
+    yorkie.v1.Operation.Remove:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+      title: Remove
+      type: object
+    yorkie.v1.Operation.Set:
+      additionalProperties: false
+      description: ""
+      properties:
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        value:
+          $ref: '#/components/schemas/yorkie.v1.JSONElementSimple'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: Set
+      type: object
+    yorkie.v1.Operation.Style:
+      additionalProperties: false
+      description: ""
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        attributesToRemove:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: attributes_to_remove
+          type: array
+        createdAtMapByActor:
+          additionalProperties: false
+          description: Deprecated for the same reason as Edit.created_at_map_by_actor.
+          title: created_at_map_by_actor
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        from:
+          $ref: '#/components/schemas/yorkie.v1.TextNodePos'
+          additionalProperties: false
+          description: ""
+          title: from
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        to:
+          $ref: '#/components/schemas/yorkie.v1.TextNodePos'
+          additionalProperties: false
+          description: ""
+          title: to
+          type: object
+      title: Style
+      type: object
+    yorkie.v1.Operation.Style.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: AttributesEntry
+      type: object
+    yorkie.v1.Operation.Style.CreatedAtMapByActorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: CreatedAtMapByActorEntry
+      type: object
+    yorkie.v1.Operation.TreeEdit:
+      additionalProperties: false
+      description: ""
+      properties:
+        contents:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeNodes'
+            type: object
+          title: contents
+          type: array
+        createdAtMapByActor:
+          additionalProperties: false
+          description: Deprecated for the same reason as Edit.created_at_map_by_actor.
+          title: created_at_map_by_actor
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        from:
+          $ref: '#/components/schemas/yorkie.v1.TreePos'
+          additionalProperties: false
+          description: ""
+          title: from
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        restoreSpans:
+          additionalProperties: false
+          description: identity-preserving undo/redo
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeRestoreSpan'
+            type: object
+          title: restore_spans
+          type: array
+        retombstoneSpans:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeRestoreSpan'
+            type: object
+          title: retombstone_spans
+          type: array
+        splitLevel:
+          additionalProperties: false
+          description: ""
+          title: split_level
+          type: integer
+        splitTickets:
+          additionalProperties: false
+          description: |-
+            split_tickets carries the tickets the originating replica issued for the
+             nodes an element split creates, in issue order. Empty for a change
+             written before this field existed, which replays through the simulation
+             that reconstructed them from executed_at and the content count.
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+            type: object
+          title: split_tickets
+          type: array
+        to:
+          $ref: '#/components/schemas/yorkie.v1.TreePos'
+          additionalProperties: false
+          description: ""
+          title: to
+          type: object
+      title: TreeEdit
+      type: object
+    yorkie.v1.Operation.TreeEdit.CreatedAtMapByActorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: CreatedAtMapByActorEntry
+      type: object
+    yorkie.v1.Operation.TreeStyle:
+      additionalProperties: false
+      description: ""
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        attributesToRemove:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: attributes_to_remove
+          type: array
+        createdAtMapByActor:
+          additionalProperties: false
+          description: Deprecated for the same reason as Edit.created_at_map_by_actor.
+          title: created_at_map_by_actor
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        from:
+          $ref: '#/components/schemas/yorkie.v1.TreePos'
+          additionalProperties: false
+          description: ""
+          title: from
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        to:
+          $ref: '#/components/schemas/yorkie.v1.TreePos'
+          additionalProperties: false
+          description: ""
+          title: to
+          type: object
+      title: TreeStyle
+      type: object
+    yorkie.v1.Operation.TreeStyle.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: AttributesEntry
+      type: object
+    yorkie.v1.Operation.TreeStyle.CreatedAtMapByActorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: CreatedAtMapByActorEntry
+      type: object
+    yorkie.v1.PeekChannelRequest:
+      additionalProperties: false
+      description: |-
+        PeekChannel reads the current session_count of a channel without creating
+         a session on the server. Use this when a client only needs to display the
+         count (e.g. "N people writing") without contributing to it and without
+         receiving broadcasts. Caller polls on its own cadence.
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+      title: PeekChannelRequest
+      type: object
+    yorkie.v1.PeekChannelResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: session_count
+      title: PeekChannelResponse
+      type: object
+    yorkie.v1.Presence:
+      additionalProperties: false
+      description: ""
+      properties:
+        data:
+          additionalProperties: false
+          description: ""
+          title: data
+          type: object
+      title: Presence
+      type: object
+    yorkie.v1.Presence.DataEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: DataEntry
+      type: object
+    yorkie.v1.PresenceChange:
+      additionalProperties: false
+      description: ""
+      properties:
+        presence:
+          $ref: '#/components/schemas/yorkie.v1.Presence'
+          additionalProperties: false
+          description: ""
+          title: presence
+          type: object
+        removedKeys:
+          additionalProperties: false
+          description: |-
+            removed_keys lists the top-level keys a CHANGE_TYPE_PATCH deletes. Unused
+             by the other change types.
+          items:
+            type: string
+          title: removed_keys
+          type: array
+        type:
+          $ref: '#/components/schemas/yorkie.v1.PresenceChange.ChangeType'
+          additionalProperties: false
+          description: ""
+          title: type
+      title: PresenceChange
+      type: object
+    yorkie.v1.PresenceChange.ChangeType:
+      description: ""
+      enum:
+      - - CHANGE_TYPE_UNSPECIFIED
+        - 0
+        - CHANGE_TYPE_PUT
+        - 1
+        - CHANGE_TYPE_DELETE
+        - 2
+        - CHANGE_TYPE_CLEAR
+        - 3
+        - CHANGE_TYPE_PATCH
+        - 4
+      title: ChangeType
+      type: string
+    yorkie.v1.PushPullChangesRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        changePack:
+          $ref: '#/components/schemas/yorkie.v1.ChangePack'
+          additionalProperties: false
+          description: ""
+          title: change_pack
+          type: object
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        disableGc:
+          additionalProperties: false
+          description: |-
+            disable_gc declares that this PushPull will not produce or consume
+             tombstones. The server skips minVV tracking and omits the response
+             VersionVector. Clients that attached with disable_gc=true must keep
+             setting this on every subsequent PushPullChanges. See
+             docs/design/disable-gc-on-attach.md.
+          title: disable_gc
+          type: boolean
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        pushOnly:
+          additionalProperties: false
+          description: ""
+          title: push_only
+          type: boolean
+      title: PushPullChangesRequest
+      type: object
+    yorkie.v1.PushPullChangesResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        changePack:
+          $ref: '#/components/schemas/yorkie.v1.ChangePack'
+          additionalProperties: false
+          description: ""
+          title: change_pack
+          type: object
+      title: PushPullChangesResponse
+      type: object
+    yorkie.v1.RefreshChannelRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        clientKey:
+          additionalProperties: false
+          description: |-
+            client_key and metadata are used only on the first call (when session_id
+             is empty). The server activates the client and attaches it to the channel
+             before refreshing, collapsing ActivateClient + AttachChannel + RefreshChannel
+             into a single round trip.
+          title: client_key
+          type: string
+        metadata:
+          additionalProperties: false
+          description: ""
+          title: metadata
+          type: object
+        sessionId:
+          additionalProperties: false
+          description: ""
+          title: session_id
+          type: string
+      title: RefreshChannelRequest
+      type: object
+    yorkie.v1.RefreshChannelRequest.MetadataEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: MetadataEntry
+      type: object
+    yorkie.v1.RefreshChannelResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientId:
+          additionalProperties: false
+          description: |-
+            client_id and session_id are populated only when the request was a
+             first-call (i.e. session_id was empty). Subsequent heartbeats leave
+             these empty.
+          title: client_id
+          type: string
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: session_count
+        sessionId:
+          additionalProperties: false
+          description: ""
+          title: session_id
+          type: string
+      title: RefreshChannelResponse
+      type: object
+    yorkie.v1.RemoveDocumentRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        changePack:
+          $ref: '#/components/schemas/yorkie.v1.ChangePack'
+          additionalProperties: false
+          description: ""
+          title: change_pack
+          type: object
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+      title: RemoveDocumentRequest
+      type: object
+    yorkie.v1.RemoveDocumentResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        changePack:
+          $ref: '#/components/schemas/yorkie.v1.ChangePack'
+          additionalProperties: false
+          description: ""
+          title: change_pack
+          type: object
+      title: RemoveDocumentResponse
+      type: object
+    yorkie.v1.ResourceDescriptor:
+      additionalProperties: false
+      description: ""
+      properties:
+        channel:
+          $ref: '#/components/schemas/yorkie.v1.ChannelDescriptor'
+          additionalProperties: false
+          description: ""
+          title: channel
+          type: object
+        document:
+          $ref: '#/components/schemas/yorkie.v1.DocumentDescriptor'
+          additionalProperties: false
+          description: ""
+          title: document
+          type: object
+      title: ResourceDescriptor
+      type: object
+    yorkie.v1.ResourceInit:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelInit:
+          $ref: '#/components/schemas/yorkie.v1.ChannelInit'
+          additionalProperties: false
+          description: ""
+          title: channel_init
+          type: object
+        documentInit:
+          $ref: '#/components/schemas/yorkie.v1.DocumentInit'
+          additionalProperties: false
+          description: ""
+          title: document_init
+          type: object
+      title: ResourceInit
+      type: object
+    yorkie.v1.RestoreMode:
+      description: |-
+        RestoreMode selects the identity-preserving path. RESTORE_MODE_UNSPECIFIED
+         means an ordinary edit (no restore semantics), keeping forward edits
+         unchanged on the wire.
+
+         For elements it selects between reviving the element already in the tree and
+         inserting a copy of it. The copy is what undo does today, and because a
+         deep copy keeps every descendant's created_at, it puts a second live element
+         under ids the document is indexed by. Reviving needs a replicated liveness
+         register -- removed_at paired with revived_at on each element -- so that
+         every replica resolves a remove/revive race the same way, with a tie going
+         to the removal as the shipped remove register already does.
+
+         The branch cannot be chosen from local state. A replica that collected
+         between the removal and the undo has purged the tombstone, and one that
+         joined from a later snapshot never had it, so "revive if a tombstone is
+         present" is a function of local collection timing and the same change log
+         would produce different documents. That is why the branch is on the wire.
+      enum:
+      - - RESTORE_MODE_UNSPECIFIED
+        - 0
+        - RESTORE_MODE_RESTORE
+        - 1
+        - RESTORE_MODE_RETOMBSTONE
+        - 2
+      title: RestoreMode
+      type: string
+    yorkie.v1.RestoreRevisionRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        revisionId:
+          additionalProperties: false
+          description: ""
+          title: revision_id
+          type: string
+      title: RestoreRevisionRequest
+      type: object
+    yorkie.v1.RestoreRevisionResponse:
+      additionalProperties: false
+      description: ""
+      title: RestoreRevisionResponse
+      type: object
+    yorkie.v1.RestoreSpan:
+      additionalProperties: false
+      description: |-
+        RestoreSpan carries a run of characters from a single original text
+         insertion, addressed by split-invariant absolute offsets [start, end),
+         for identity-preserving undo/redo. content and attributes are a deep
+         copy of the removed value so restore is independent of GC state.
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        content:
+          additionalProperties: false
+          description: ""
+          title: content
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        end:
+          additionalProperties: false
+          description: ""
+          title: end
+          type: integer
+        start:
+          additionalProperties: false
+          description: ""
+          title: start
+          type: integer
+      title: RestoreSpan
+      type: object
+    yorkie.v1.RestoreSpan.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: AttributesEntry
+      type: object
+    yorkie.v1.RevisionSummary:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        description:
+          additionalProperties: false
+          description: ""
+          title: description
+          type: string
+        id:
+          additionalProperties: false
+          description: ""
+          title: id
+          type: string
+        label:
+          additionalProperties: false
+          description: ""
+          title: label
+          type: string
+        snapshot:
+          additionalProperties: false
+          description: ""
+          title: snapshot
+          type: string
+      title: RevisionSummary
+      type: object
+    yorkie.v1.Rule:
+      additionalProperties: false
+      description: ""
+      properties:
+        path:
+          additionalProperties: false
+          description: ""
+          title: path
+          type: string
+        treeNodes:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeNodeRule'
+            type: object
+          title: tree_nodes
+          type: array
+        type:
+          additionalProperties: false
+          description: ""
+          title: type
+          type: string
+      title: Rule
+      type: object
+    yorkie.v1.TextNodePos:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        offset:
+          additionalProperties: false
+          description: ""
+          title: offset
+          type: integer
+        relativeOffset:
+          additionalProperties: false
+          description: ""
+          title: relative_offset
+          type: integer
+      title: TextNodePos
+      type: object
+    yorkie.v1.TimeTicket:
+      additionalProperties: false
+      description: ""
+      properties:
+        actorId:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: actor_id
+          type: string
+        delimiter:
+          additionalProperties: false
+          description: ""
+          title: delimiter
+          type: integer
+        lamport:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: lamport
+      title: TimeTicket
+      type: object
+    yorkie.v1.TreeNode:
+      additionalProperties: false
+      description: ""
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        depth:
+          additionalProperties: false
+          description: ""
+          title: depth
+          type: integer
+        id:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: id
+          type: object
+        insNextId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: ins_next_id
+          type: object
+        insPrevId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: ins_prev_id
+          type: object
+        mergedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: |-
+            merged_at records the immutable ticket of the merge operation.
+             Stored alongside merged_from because the source parent's removed_at
+             may be overwritten by later LWW tombstones and thus cannot serve as
+             the merge-time causal boundary for SplitElement. See
+             docs/design/concurrent-merge-split.md for details.
+          title: merged_at
+          type: object
+        mergedFrom:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: |-
+            merged_from is set when this node was moved to a new parent by a
+             concurrent merge. It points to the source parent's ID.
+          title: merged_from
+          type: object
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        type:
+          additionalProperties: false
+          description: ""
+          title: type
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: TreeNode
+      type: object
+    yorkie.v1.TreeNode.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.NodeAttr'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: AttributesEntry
+      type: object
+    yorkie.v1.TreeNodeID:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        offset:
+          additionalProperties: false
+          description: ""
+          title: offset
+          type: integer
+      title: TreeNodeID
+      type: object
+    yorkie.v1.TreeNodeRule:
+      additionalProperties: false
+      description: ""
+      properties:
+        content:
+          additionalProperties: false
+          description: ""
+          title: content
+          type: string
+        group:
+          additionalProperties: false
+          description: ""
+          title: group
+          type: string
+        marks:
+          additionalProperties: false
+          description: ""
+          title: marks
+          type: string
+        nodeType:
+          additionalProperties: false
+          description: ""
+          title: node_type
+          type: string
+      title: TreeNodeRule
+      type: object
+    yorkie.v1.TreeNodes:
+      additionalProperties: false
+      description: ""
+      properties:
+        content:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeNode'
+            type: object
+          title: content
+          type: array
+      title: TreeNodes
+      type: object
+    yorkie.v1.TreePos:
+      additionalProperties: false
+      description: ""
+      properties:
+        leftSiblingId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: left_sibling_id
+          type: object
+        parentId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: parent_id
+          type: object
+      title: TreePos
+      type: object
+    yorkie.v1.TreeRestoreSpan:
+      additionalProperties: false
+      description: |-
+        TreeRestoreSpan carries a tree node run from a single deletion, addressed
+         by TreeNodeID identity, for identity-preserving Tree undo/redo. Unlike the
+         text RestoreSpan (flat offsets), a tree span records the node's structure
+         (type/attrs) and its position anchors, because in a tree id-order is not
+         sibling-order: left_sibling_id and right_sibling_id are redundant external
+         boundary anchors of the deleted run, so restore can reconstruct the run's
+         internal order from the op's own spans and needs only one surviving
+         boundary to place it. value/attributes are a deep copy so a GC-purged node
+         can be recreated.
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        id:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: id
+          type: object
+        isText:
+          additionalProperties: false
+          description: ""
+          title: is_text
+          type: boolean
+        leftSiblingId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: left_sibling_id
+          type: object
+        length:
+          additionalProperties: false
+          description: ""
+          title: length
+          type: integer
+        nodeType:
+          additionalProperties: false
+          description: ""
+          title: node_type
+          type: string
+        parentId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: parent_id
+          type: object
+        rightSiblingId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: right_sibling_id
+          type: object
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: TreeRestoreSpan
+      type: object
+    yorkie.v1.TreeRestoreSpan.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.NodeAttr'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: AttributesEntry
+      type: object
+    yorkie.v1.ValueType:
+      description: ""
+      enum:
+      - - VALUE_TYPE_NULL
+        - 0
+        - VALUE_TYPE_BOOLEAN
+        - 1
+        - VALUE_TYPE_INTEGER
+        - 2
+        - VALUE_TYPE_LONG
+        - 3
+        - VALUE_TYPE_DOUBLE
+        - 4
+        - VALUE_TYPE_STRING
+        - 5
+        - VALUE_TYPE_BYTES
+        - 6
+        - VALUE_TYPE_DATE
+        - 7
+        - VALUE_TYPE_JSON_OBJECT
+        - 8
+        - VALUE_TYPE_JSON_ARRAY
+        - 9
+        - VALUE_TYPE_TEXT
+        - 10
+        - VALUE_TYPE_INTEGER_CNT
+        - 11
+        - VALUE_TYPE_LONG_CNT
+        - 12
+        - VALUE_TYPE_TREE
+        - 13
+        - VALUE_TYPE_INTEGER_DEDUP_CNT
+        - 14
+      title: ValueType
+      type: string
+    yorkie.v1.VersionVector:
+      additionalProperties: false
+      description: ""
+      properties:
+        vector:
+          additionalProperties: false
+          description: ""
+          title: vector
+          type: object
+      title: VersionVector
+      type: object
+    yorkie.v1.VersionVector.VectorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: value
+      title: VectorEntry
+      type: object
+    yorkie.v1.WatchChannelInitialized:
+      additionalProperties: false
+      description: 'Deprecated: Use ChannelInit instead.'
+      properties:
+        seq:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: seq
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: session_count
+      title: WatchChannelInitialized
+      type: object
+    yorkie.v1.WatchChannelRequest:
+      additionalProperties: false
+      description: 'Deprecated: Use WatchRequest instead.'
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+      title: WatchChannelRequest
+      type: object
+    yorkie.v1.WatchChannelResponse:
+      additionalProperties: false
+      description: 'Deprecated: Use WatchResponse instead.'
+      properties:
+        event:
+          $ref: '#/components/schemas/yorkie.v1.ChannelEvent'
+          additionalProperties: false
+          description: ""
+          title: event
+          type: object
+        initialized:
+          $ref: '#/components/schemas/yorkie.v1.WatchChannelInitialized'
+          additionalProperties: false
+          description: ""
+          title: initialized
+          type: object
+      title: WatchChannelResponse
+      type: object
+    yorkie.v1.WatchDocumentRequest:
+      additionalProperties: false
+      description: 'Deprecated: Use WatchRequest instead.'
+      properties:
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+      title: WatchDocumentRequest
+      type: object
+    yorkie.v1.WatchDocumentResponse:
+      additionalProperties: false
+      description: 'Deprecated: Use WatchResponse instead.'
+      properties:
+        event:
+          $ref: '#/components/schemas/yorkie.v1.DocEvent'
+          additionalProperties: false
+          description: ""
+          title: event
+          type: object
+        initialization:
+          $ref: '#/components/schemas/yorkie.v1.WatchDocumentResponse.Initialization'
+          additionalProperties: false
+          description: ""
+          title: initialization
+          type: object
+      title: WatchDocumentResponse
+      type: object
+    yorkie.v1.WatchDocumentResponse.Initialization:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientIds:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: client_ids
+          type: array
+      title: Initialization
+      type: object
+    yorkie.v1.WatchEvent:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelEvent:
+          $ref: '#/components/schemas/yorkie.v1.ChannelWatchEvent'
+          additionalProperties: false
+          description: ""
+          title: channel_event
+          type: object
+        docEvent:
+          $ref: '#/components/schemas/yorkie.v1.DocWatchEvent'
+          additionalProperties: false
+          description: ""
+          title: doc_event
+          type: object
+      title: WatchEvent
+      type: object
+    yorkie.v1.WatchHeartbeat:
+      additionalProperties: false
+      description: |-
+        WatchHeartbeat is sent on an idle Watch stream so a client can tell a live
+         stream from a half-open one. It carries no payload: its arrival is the
+         signal.
+      title: WatchHeartbeat
+      type: object
+    yorkie.v1.WatchInitialization:
+      additionalProperties: false
+      description: ""
+      properties:
+        heartbeatIntervalMs:
+          additionalProperties: false
+          description: |-
+            heartbeat_interval_ms is the interval, in milliseconds, at which the
+             server sends a WatchHeartbeat on this stream while it is idle. 0 means
+             the server sends none, so the client must not apply an idle timeout.
+          oneOf:
+          - type: string
+          - type: number
+          title: heartbeat_interval_ms
+        resourceInits:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.ResourceInit'
+            type: object
+          title: resource_inits
+          type: array
+      title: WatchInitialization
+      type: object
+    yorkie.v1.WatchRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        actorId:
+          additionalProperties: false
+          description: |-
+            actor_id is the stable actor the client stamps into its changes. When set,
+             the server subscribes the client under it so watch peer ids and
+             watched/unwatched events match the presence CRDT keying. Old SDKs omit it
+             and the server falls back to client_id (the session id).
+          title: actor_id
+          type: string
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        heartbeatIntervalMs:
+          additionalProperties: false
+          description: |-
+            heartbeat_interval_ms is the interval, in milliseconds, at which this
+             stream asks the server to send a WatchHeartbeat while it is idle. 0, which
+             is also what an SDK older than the heartbeat leaves here, asks for none:
+             such a stream gets no WatchHeartbeat bodies at all, so the heartbeat can
+             never reach a client that would not recognize it. The server clamps the
+             request to its own bounds and reports the value it settled on in
+             WatchInitialization.heartbeat_interval_ms.
+          oneOf:
+          - type: string
+          - type: number
+          title: heartbeat_interval_ms
+        resources:
+          additionalProperties: false
+          description: |-
+            resources lists what the stream delivers. It must hold between 1 and 100
+             descriptors, and the server must recognize every one of them: a request
+             naming a resource the server cannot subscribe to is rejected whole rather
+             than served in part, so a client never watches fewer resources than it
+             asked for without being told.
+          items:
+            $ref: '#/components/schemas/yorkie.v1.ResourceDescriptor'
+            type: object
+          title: resources
+          type: array
+      title: WatchRequest
+      type: object
+    yorkie.v1.WatchResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        event:
+          $ref: '#/components/schemas/yorkie.v1.WatchEvent'
+          additionalProperties: false
+          description: ""
+          title: event
+          type: object
+        heartbeat:
+          $ref: '#/components/schemas/yorkie.v1.WatchHeartbeat'
+          additionalProperties: false
+          description: ""
+          title: heartbeat
+          type: object
+        initialization:
+          $ref: '#/components/schemas/yorkie.v1.WatchInitialization'
+          additionalProperties: false
+          description: ""
+          title: initialization
+          type: object
+      title: WatchResponse
+      type: object
+  securitySchemes:
+    ApiKeyAuth:
+      in: header
+      name: Authorization
+      type: apiKey
+security:
+- ApiKeyAuth: []
+tags:
+- description: Yorkie is a service that provides an API for SDKs.
+  name: yorkie.v1.YorkieService

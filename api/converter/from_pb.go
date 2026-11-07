@@ -1,0 +1,1758 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package converter
+
+import (
+	goerrors "errors"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	gotime "time"
+	"unicode/utf16"
+
+	"github.com/yorkie-team/yorkie/api/types"
+	"github.com/yorkie-team/yorkie/api/types/events"
+	api "github.com/yorkie-team/yorkie/api/yorkie/v1"
+	"github.com/yorkie-team/yorkie/pkg/document/change"
+	"github.com/yorkie-team/yorkie/pkg/document/crdt"
+	"github.com/yorkie-team/yorkie/pkg/document/operations"
+	"github.com/yorkie-team/yorkie/pkg/document/presence"
+	"github.com/yorkie-team/yorkie/pkg/document/resource"
+	"github.com/yorkie-team/yorkie/pkg/document/time"
+	"github.com/yorkie-team/yorkie/pkg/errors"
+	"github.com/yorkie-team/yorkie/pkg/key"
+)
+
+var (
+	// ErrUnsupportedDateRange is returned when the given date range is unsupported.
+	ErrUnsupportedDateRange = errors.InvalidArgument("unsupported date range")
+
+	// ErrInvalidSchemaKey is returned when the given schema key is invalid.
+	ErrInvalidSchemaKey = errors.InvalidArgument("invalid schema key").WithCode("ErrInvalidSchemaKey")
+
+	// ErrNonFiniteCounterDelta is returned when an increase operation carries a
+	// NaN or an infinity as its delta.
+	ErrNonFiniteCounterDelta = errors.InvalidArgument("non-finite counter delta").
+					WithCode("ErrNonFiniteCounterDelta")
+)
+
+// FromUser converts the given Protobuf formats to model format.
+func FromUser(pbUser *api.User) *types.User {
+	return &types.User{
+		ID:           types.ID(pbUser.Id),
+		AuthProvider: pbUser.AuthProvider,
+		Username:     pbUser.Username,
+		CreatedAt:    pbUser.CreatedAt.AsTime(),
+	}
+}
+
+// FromMember converts the given Protobuf formats to model format.
+func FromMember(pbMember *api.Member) *types.Member {
+	return &types.Member{
+		ID:        types.ID(pbMember.Id),
+		ProjectID: types.ID(pbMember.ProjectId),
+		UserID:    types.ID(pbMember.UserId),
+		Username:  pbMember.Username,
+		Role:      pbMember.Role,
+		InvitedAt: pbMember.InvitedAt.AsTime(),
+	}
+}
+
+// FromMembers converts the given Protobuf formats to model format.
+func FromMembers(pbMembers []*api.Member) []*types.Member {
+	var members []*types.Member
+	for _, pbMember := range pbMembers {
+		members = append(members, FromMember(pbMember))
+	}
+	return members
+}
+
+// FromProjects converts the given Protobuf formats to model format.
+func FromProjects(pbProjects []*api.Project) []*types.Project {
+	var projects []*types.Project
+	for _, pbProject := range pbProjects {
+		projects = append(projects, FromProject(pbProject))
+	}
+	return projects
+}
+
+// FromProject converts the given Protobuf formats to model format.
+func FromProject(pbProject *api.Project) *types.Project {
+	return &types.Project{
+		ID:                          types.ID(pbProject.Id),
+		Name:                        pbProject.Name,
+		AuthWebhookURL:              pbProject.AuthWebhookUrl,
+		AuthWebhookMethods:          pbProject.AuthWebhookMethods,
+		AuthWebhookMaxRetries:       uint64(pbProject.AuthWebhookMaxRetries),
+		AuthWebhookMinWaitInterval:  pbProject.AuthWebhookMinWaitInterval,
+		AuthWebhookMaxWaitInterval:  pbProject.AuthWebhookMaxWaitInterval,
+		AuthWebhookRequestTimeout:   pbProject.AuthWebhookRequestTimeout,
+		EventWebhookURL:             pbProject.EventWebhookUrl,
+		EventWebhookEvents:          pbProject.EventWebhookEvents,
+		EventWebhookMaxRetries:      uint64(pbProject.EventWebhookMaxRetries),
+		EventWebhookMinWaitInterval: pbProject.EventWebhookMinWaitInterval,
+		EventWebhookMaxWaitInterval: pbProject.EventWebhookMaxWaitInterval,
+		EventWebhookRequestTimeout:  pbProject.EventWebhookRequestTimeout,
+		ClientDeactivateThreshold:   pbProject.ClientDeactivateThreshold,
+		ChannelSessionTTL:           pbProject.ChannelSessionTtl,
+		SnapshotThreshold:           int64(pbProject.SnapshotThreshold),
+		SnapshotInterval:            int64(pbProject.SnapshotInterval),
+		MaxSubscribersPerDocument:   int(pbProject.MaxSubscribersPerDocument),
+		MaxAttachmentsPerDocument:   int(pbProject.MaxAttachmentsPerDocument),
+		MaxSizePerDocument:          int(pbProject.MaxSizePerDocument),
+		RemoveOnDetach:              bool(pbProject.RemoveOnDetach),
+		AutoRevisionEnabled:         bool(pbProject.AutoRevisionEnabled),
+		AllowedOrigins:              pbProject.AllowedOrigins,
+		PublicKey:                   pbProject.PublicKey,
+		SecretKey:                   pbProject.SecretKey,
+		CreatedAt:                   pbProject.CreatedAt.AsTime(),
+		UpdatedAt:                   pbProject.UpdatedAt.AsTime(),
+	}
+}
+
+// FromDocumentSummaries converts the given Protobuf formats to model format.
+func FromDocumentSummaries(pbSummaries []*api.DocumentSummary) []*types.DocumentSummary {
+	var summaries []*types.DocumentSummary
+	for _, pbSummary := range pbSummaries {
+		summaries = append(summaries, FromDocumentSummary(pbSummary))
+	}
+	return summaries
+}
+
+// FromDocumentSummary converts the given Protobuf formats to model format.
+func FromDocumentSummary(pbSummary *api.DocumentSummary) *types.DocumentSummary {
+	summary := &types.DocumentSummary{
+		ID:              types.ID(pbSummary.Id),
+		Key:             key.Key(pbSummary.Key),
+		AttachedClients: int(pbSummary.AttachedClients),
+		CreatedAt:       pbSummary.CreatedAt.AsTime(),
+		AccessedAt:      pbSummary.AccessedAt.AsTime(),
+		UpdatedAt:       pbSummary.UpdatedAt.AsTime(),
+		Root:            pbSummary.Root,
+		DocSize:         FromDocSize(pbSummary.DocumentSize),
+	}
+
+	if pbSummary.Presences != nil {
+		presences := make(map[string]presence.Data)
+		for k, v := range pbSummary.Presences {
+			presences[k] = fromPresence(v)
+		}
+		summary.Presences = presences
+	}
+
+	return summary
+}
+
+// FromChannelSummary converts the given Protobuf formats to model format.
+func FromChannelSummary(pbChannelSummary *api.ChannelSummary) *types.ChannelSummary {
+	return &types.ChannelSummary{
+		Key:          key.Key(pbChannelSummary.Key),
+		SessionCount: int64(pbChannelSummary.SessionCount),
+	}
+}
+
+// FromChannelSummaries converts the given Protobuf formats to model format.
+func FromChannelSummaries(pbChannelSummaries []*api.ChannelSummary) []*types.ChannelSummary {
+	var summaries []*types.ChannelSummary
+	for _, pbSummary := range pbChannelSummaries {
+		if pbSummary == nil {
+			continue
+		}
+		summaries = append(summaries, FromChannelSummary(pbSummary))
+	}
+	return summaries
+}
+
+// FromChangePack converts the given Protobuf formats to model format.
+func FromChangePack(pbPack *api.ChangePack) (*change.Pack, error) {
+	if pbPack == nil {
+		return nil, ErrPackRequired
+	}
+	if pbPack.Checkpoint == nil {
+		return nil, ErrCheckpointRequired
+	}
+
+	changes, err := FromChanges(pbPack.Changes)
+	if err != nil {
+		return nil, err
+	}
+
+	versionVector, err := FromVersionVector(pbPack.VersionVector)
+	if err != nil {
+		return nil, err
+	}
+
+	pack := &change.Pack{
+		DocumentKey:   key.Key(pbPack.DocumentKey),
+		Checkpoint:    fromCheckpoint(pbPack.Checkpoint),
+		Changes:       changes,
+		Snapshot:      pbPack.Snapshot,
+		IsRemoved:     pbPack.IsRemoved,
+		VersionVector: versionVector,
+		Epoch:         pbPack.Epoch,
+	}
+
+	return pack, nil
+}
+
+func fromCheckpoint(pbCheckpoint *api.Checkpoint) change.Checkpoint {
+	return change.NewCheckpoint(
+		pbCheckpoint.ServerSeq,
+		pbCheckpoint.ClientSeq,
+	)
+}
+
+// FromChanges converts the given Protobuf formats to model format.
+func FromChanges(pbChanges []*api.Change) ([]*change.Change, error) {
+	var changes []*change.Change
+	for _, pbChange := range pbChanges {
+		if pbChange == nil {
+			return nil, goerrors.New("change missing")
+		}
+
+		changeID, err := fromChangeID(pbChange.Id)
+		if err != nil {
+			return nil, err
+		}
+		ops, err := FromOperations(pbChange.Operations)
+		if err != nil {
+			return nil, err
+		}
+		presenceChange, err := FromPresenceChange(pbChange.PresenceChange)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, change.New(
+			changeID,
+			pbChange.Message,
+			ops,
+			presenceChange,
+		))
+	}
+
+	return changes, nil
+}
+
+func fromChangeID(id *api.ChangeID) (change.ID, error) {
+	if id == nil {
+		return change.InitialID(), goerrors.New("change id missing")
+	}
+
+	actorID, err := time.ActorIDFromBytes(id.ActorId)
+	if err != nil {
+		return change.InitialID(), err
+	}
+
+	vector, err := FromVersionVector(id.VersionVector)
+	if err != nil {
+		return change.InitialID(), err
+	}
+
+	return change.NewID(
+		id.ClientSeq,
+		id.ServerSeq,
+		id.Lamport,
+		actorID,
+		vector,
+	), nil
+}
+
+// FromVersionVector converts the given Protobuf formats to model format.
+func FromVersionVector(pbVersionVector *api.VersionVector) (time.VersionVector, error) {
+	versionVector := make(time.VersionVector)
+	if pbVersionVector == nil {
+		return versionVector, nil
+	}
+	for id, lamport := range pbVersionVector.Vector {
+		actorID, err := time.ActorIDFromBase64(id)
+		if err != nil {
+			return nil, err
+		}
+		versionVector.Set(actorID, lamport)
+	}
+
+	return versionVector, nil
+}
+
+// FromDocumentID converts the given Protobuf formats to model format.
+func FromDocumentID(pbID string) (types.ID, error) {
+	id := types.ID(pbID)
+	if err := id.Validate(); err != nil {
+		return "", err
+	}
+
+	return id, nil
+}
+
+// FromEventType converts the given Protobuf formats to model format.
+func FromEventType(pbDocEventType api.DocEventType) (events.DocEventType, error) {
+	switch pbDocEventType {
+	case api.DocEventType_DOC_EVENT_TYPE_DOCUMENT_CHANGED:
+		return events.DocChanged, nil
+	case api.DocEventType_DOC_EVENT_TYPE_DOCUMENT_WATCHED:
+		return events.DocWatched, nil
+	case api.DocEventType_DOC_EVENT_TYPE_DOCUMENT_UNWATCHED:
+		return events.DocUnwatched, nil
+	}
+	return "", fmt.Errorf("%v: %w", pbDocEventType, ErrUnsupportedEventType)
+}
+
+// FromDataSize converts the given Protobuf formats to model format.
+func FromDataSize(pbDataSize *api.DataSize) resource.DataSize {
+	return resource.DataSize{
+		Data: int(pbDataSize.Data),
+		Meta: int(pbDataSize.Meta),
+	}
+}
+
+// FromDocSize converts the given Protobuf formats to model format.
+func FromDocSize(pbDocSize *api.DocSize) resource.DocSize {
+	return resource.DocSize{
+		Live: FromDataSize(pbDocSize.Live),
+		GC:   FromDataSize(pbDocSize.Gc),
+	}
+}
+
+// FromOperations converts the given Protobuf formats to model format.
+func FromOperations(pbOps []*api.Operation) ([]operations.Operation, error) {
+	var ops []operations.Operation
+	for _, pbOp := range pbOps {
+		op, err := fromOperation(pbOp)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+
+	return ops, nil
+}
+
+// fromOperation converts a single operation. It is split out of FromOperations
+// so the stored-decode path can ask about one operation at a time; see
+// withoutUndatedOperations.
+func fromOperation(pbOp *api.Operation) (operations.Operation, error) {
+	if pbOp == nil {
+		return nil, goerrors.New("operation missing")
+	}
+
+	switch decoded := pbOp.Body.(type) {
+	case *api.Operation_Set_:
+		return fromSet(decoded.Set)
+	case *api.Operation_Add_:
+		return fromAdd(decoded.Add)
+	case *api.Operation_Move_:
+		return fromMove(decoded.Move)
+	case *api.Operation_Remove_:
+		return fromRemove(decoded.Remove)
+	case *api.Operation_Edit_:
+		return fromEdit(decoded.Edit)
+	case *api.Operation_Style_:
+		return fromStyle(decoded.Style)
+	case *api.Operation_Increase_:
+		return fromIncrease(decoded.Increase)
+	case *api.Operation_TreeEdit_:
+		return fromTreeEdit(decoded.TreeEdit)
+	case *api.Operation_TreeStyle_:
+		return fromTreeStyle(decoded.TreeStyle)
+	case *api.Operation_ArraySet_:
+		return fromArraySet(decoded.ArraySet)
+	default:
+		return nil, ErrUnsupportedOperation
+	}
+}
+
+func fromPresences(pbPresences map[string]*api.Presence) *presence.Map {
+	presences := presence.NewMap()
+	for id, pbPresence := range pbPresences {
+		presences.Store(id, fromPresence(pbPresence))
+	}
+	return presences
+}
+
+func fromPresence(pbPresence *api.Presence) presence.Data {
+	if pbPresence == nil {
+		return nil
+	}
+
+	data := pbPresence.GetData()
+	if data == nil {
+		data = presence.NewData()
+	}
+
+	return data
+}
+
+// FromPresenceChange converts the given Protobuf formats to model format.
+func FromPresenceChange(pbPresenceChange *api.PresenceChange) (*presence.Change, error) {
+	if pbPresenceChange == nil {
+		return nil, nil
+	}
+
+	var p presence.Change
+	switch pbPresenceChange.Type {
+	case api.PresenceChange_CHANGE_TYPE_PUT:
+		presenceData := fromPresence(pbPresenceChange.Presence)
+		if presenceData == nil {
+			return nil, goerrors.New("presence missing")
+		}
+		p = presence.Change{
+			ChangeType: presence.Put,
+			Presence:   presenceData,
+		}
+	case api.PresenceChange_CHANGE_TYPE_CLEAR:
+		p = presence.Change{
+			ChangeType: presence.Clear,
+			Presence:   nil,
+		}
+	case api.PresenceChange_CHANGE_TYPE_PATCH:
+		// A patch that only removes keys may leave presence unset.
+		presenceData := fromPresence(pbPresenceChange.Presence)
+		if presenceData == nil {
+			presenceData = presence.NewData()
+		}
+		p = presence.Change{
+			ChangeType:  presence.Patch,
+			Presence:    presenceData,
+			RemovedKeys: pbPresenceChange.RemovedKeys,
+		}
+	default:
+		// Refuse a type this build does not define, rather than decoding it
+		// into an empty change that Execute would store as a nil presence: a
+		// client that negotiated a newer type must not wipe its presence on a
+		// server that predates it. Defined but unused types (UNSPECIFIED,
+		// DELETE) keep decoding as before, since stored rows go through here.
+		if _, ok := api.PresenceChange_ChangeType_name[int32(pbPresenceChange.Type)]; !ok {
+			return nil, fmt.Errorf("%d: %w", pbPresenceChange.Type, ErrUnsupportedPresenceChangeType)
+		}
+	}
+
+	return &p, nil
+}
+
+func fromSet(pbSet *api.Operation_Set) (*operations.Set, error) {
+	if pbSet == nil {
+		return nil, goerrors.New("operation set missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbSet.ParentCreatedAt, "set.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+	executedAt, err := fromRequiredTimeTicket(pbSet.ExecutedAt, "set.executed_at")
+	if err != nil {
+		return nil, err
+	}
+	elem, err := fromElement(pbSet.Value)
+	if err != nil {
+		return nil, err
+	}
+
+	return operations.NewSet(
+		parentCreatedAt,
+		pbSet.Key,
+		elem,
+		executedAt,
+	), nil
+}
+
+func fromAdd(pbAdd *api.Operation_Add) (*operations.Add, error) {
+	if pbAdd == nil {
+		return nil, goerrors.New("operation add missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbAdd.ParentCreatedAt, "add.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+	prevCreatedAt, err := fromRequiredTimeTicket(pbAdd.PrevCreatedAt, "add.prev_created_at")
+	if err != nil {
+		return nil, err
+	}
+	elem, err := fromElement(pbAdd.Value)
+	if err != nil {
+		return nil, err
+	}
+	executedAt, err := fromRequiredTimeTicket(pbAdd.ExecutedAt, "add.executed_at")
+	if err != nil {
+		return nil, err
+	}
+	return operations.NewAdd(
+		parentCreatedAt,
+		prevCreatedAt,
+		elem,
+		executedAt,
+	), nil
+}
+
+func fromMove(pbMove *api.Operation_Move) (*operations.Move, error) {
+	if pbMove == nil {
+		return nil, goerrors.New("operation move missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbMove.ParentCreatedAt, "move.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+	prevCreatedAt, err := fromRequiredTimeTicket(pbMove.PrevCreatedAt, "move.prev_created_at")
+	if err != nil {
+		return nil, err
+	}
+	createdAt, err := fromRequiredTimeTicket(pbMove.CreatedAt, "move.created_at")
+	if err != nil {
+		return nil, err
+	}
+	executedAt, err := fromRequiredTimeTicket(pbMove.ExecutedAt, "move.executed_at")
+	if err != nil {
+		return nil, err
+	}
+	return operations.NewMove(
+		parentCreatedAt,
+		prevCreatedAt,
+		createdAt,
+		executedAt,
+	), nil
+}
+
+func fromRemove(pbRemove *api.Operation_Remove) (*operations.Remove, error) {
+	if pbRemove == nil {
+		return nil, goerrors.New("operation remove missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbRemove.ParentCreatedAt, "remove.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+	createdAt, err := fromRequiredTimeTicket(pbRemove.CreatedAt, "remove.created_at")
+	if err != nil {
+		return nil, err
+	}
+	executedAt, err := fromRequiredTimeTicket(pbRemove.ExecutedAt, "remove.executed_at")
+	if err != nil {
+		return nil, err
+	}
+	return operations.NewRemove(
+		parentCreatedAt,
+		createdAt,
+		executedAt,
+	), nil
+}
+
+func fromEdit(pbEdit *api.Operation_Edit) (*operations.Edit, error) {
+	if pbEdit == nil {
+		return nil, goerrors.New("operation edit missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbEdit.ParentCreatedAt, "edit.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+	from, err := fromTextNodePos(pbEdit.From)
+	if err != nil {
+		return nil, err
+	}
+	to, err := fromTextNodePos(pbEdit.To)
+	if err != nil {
+		return nil, err
+	}
+	executedAt, err := fromRequiredTimeTicket(pbEdit.ExecutedAt, "edit.executed_at")
+	if err != nil {
+		return nil, err
+	}
+	restoreSpans, err := fromRestoreSpans(pbEdit.RestoreSpans)
+	if err != nil {
+		return nil, err
+	}
+	retombstoneSpans, err := fromRestoreSpans(pbEdit.RetombstoneSpans)
+	if err != nil {
+		return nil, err
+	}
+	// A restore payload and a restore mode only mean anything together, so
+	// reject either one without the other. Without this, Execute's span-based
+	// guard falls through to the ordinary edit path: spans without a mode are
+	// silently dropped, and a mode without spans applies from/to as a range
+	// DELETION under a "restore" label (also discarding content/attributes).
+	// Neither is something a well-formed client sends.
+	mode := fromRestoreMode(pbEdit.RestoreMode)
+	hasMode := mode != crdt.RestoreModeNone
+	hasSpans := len(restoreSpans) > 0 || len(retombstoneSpans) > 0
+	if hasMode != hasSpans {
+		return nil, ErrInvalidRestoreSpan
+	}
+	if hasMode {
+		return operations.NewRestoreEdit(
+			parentCreatedAt,
+			from,
+			to,
+			executedAt,
+			restoreSpans,
+			mode,
+			retombstoneSpans,
+		), nil
+	}
+	return operations.NewEdit(
+		parentCreatedAt,
+		from,
+		to,
+		pbEdit.Content,
+		pbEdit.Attributes,
+		executedAt,
+	), nil
+}
+
+func fromRestoreSpans(pbSpans []*api.RestoreSpan) ([]*crdt.RestoreSpan, error) {
+	if len(pbSpans) == 0 {
+		return nil, nil
+	}
+
+	spans := make([]*crdt.RestoreSpan, 0, len(pbSpans))
+	for _, pbSpan := range pbSpans {
+		if pbSpan == nil {
+			return nil, ErrInvalidRestoreSpan
+		}
+		if pbSpan.Start < 0 || pbSpan.End < pbSpan.Start {
+			return nil, ErrInvalidRestoreSpan
+		}
+		// Text positions are indexed in UTF-16 code units, so the span's
+		// range must match Content's length under the same metric.
+		if int(pbSpan.End-pbSpan.Start) != len(utf16.Encode([]rune(pbSpan.Content))) {
+			return nil, ErrInvalidRestoreSpan
+		}
+
+		createdAt, err := fromTimeTicket(pbSpan.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		// A span addresses content by its original insertion identity, so a
+		// missing created_at is malformed. Reject it here rather than letting
+		// a nil ticket reach restore()/retombstone(), where it would panic on
+		// the first comparison (server-executed, client-supplied input).
+		if createdAt == nil {
+			return nil, ErrInvalidRestoreSpan
+		}
+		spans = append(spans, &crdt.RestoreSpan{
+			CreatedAt:  createdAt,
+			Start:      int(pbSpan.Start),
+			End:        int(pbSpan.End),
+			Content:    pbSpan.Content,
+			Attributes: pbSpan.Attributes,
+		})
+	}
+	return spans, nil
+}
+
+func fromRestoreMode(mode api.RestoreMode) crdt.RestoreMode {
+	switch mode {
+	case api.RestoreMode_RESTORE_MODE_RESTORE:
+		return crdt.RestoreModeRestore
+	case api.RestoreMode_RESTORE_MODE_RETOMBSTONE:
+		return crdt.RestoreModeRetombstone
+	default:
+		return crdt.RestoreModeNone
+	}
+}
+
+func fromStyle(pbStyle *api.Operation_Style) (*operations.Style, error) {
+	if pbStyle == nil {
+		return nil, goerrors.New("operation style missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbStyle.ParentCreatedAt, "style.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+	from, err := fromTextNodePos(pbStyle.From)
+	if err != nil {
+		return nil, err
+	}
+	to, err := fromTextNodePos(pbStyle.To)
+	if err != nil {
+		return nil, err
+	}
+	executedAt, err := fromRequiredTimeTicket(pbStyle.ExecutedAt, "style.executed_at")
+	if err != nil {
+		return nil, err
+	}
+
+	// A Style operation's wire form always carries both Attributes and
+	// AttributesToRemove (see toStyle), and JS's StyleOperation constructor
+	// always accepts both -- so decoding whichever field is non-empty is
+	// not exclusive. A reverse Style built for undo/redo can populate both
+	// at once (restore some keys, remove others that did not exist
+	// before), and decoding only one would silently drop the other.
+	if len(pbStyle.Attributes) > 0 && len(pbStyle.AttributesToRemove) > 0 {
+		return operations.NewStyleSetAndRemove(
+			parentCreatedAt,
+			from,
+			to,
+			pbStyle.Attributes,
+			pbStyle.AttributesToRemove,
+			executedAt,
+		), nil
+	}
+
+	if len(pbStyle.AttributesToRemove) > 0 {
+		return operations.NewStyleRemove(
+			parentCreatedAt,
+			from,
+			to,
+			pbStyle.AttributesToRemove,
+			executedAt,
+		), nil
+	}
+
+	return operations.NewStyle(
+		parentCreatedAt,
+		from,
+		to,
+		pbStyle.Attributes,
+		executedAt,
+	), nil
+}
+
+func fromIncrease(pbInc *api.Operation_Increase) (*operations.Increase, error) {
+	if pbInc == nil {
+		return nil, goerrors.New("operation increase missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbInc.ParentCreatedAt, "increase.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+	elem, err := fromElement(pbInc.Value)
+	if err != nil {
+		return nil, err
+	}
+	// A NaN or an infinity has no integer value to add, so every replica
+	// drops it (crdt.Counter.Increase) and the counter silently diverges from
+	// one that does not. Reject it here, at the boundary, so the change is
+	// never stored or broadcast rather than merely ignored by Go replicas.
+	if prim, ok := elem.(*crdt.Primitive); ok {
+		if f, ok := prim.Value().(float64); ok && (math.IsNaN(f) || math.IsInf(f, 0)) {
+			return nil, ErrNonFiniteCounterDelta
+		}
+	}
+	executedAt, err := fromRequiredTimeTicket(pbInc.ExecutedAt, "increase.executed_at")
+	if err != nil {
+		return nil, err
+	}
+	if pbInc.GetActor() != "" {
+		return operations.NewIncreaseWithActor(
+			parentCreatedAt,
+			elem,
+			executedAt,
+			pbInc.GetActor(),
+		), nil
+	}
+	return operations.NewIncrease(
+		parentCreatedAt,
+		elem,
+		executedAt,
+	), nil
+}
+
+func fromTreeEdit(pbTreeEdit *api.Operation_TreeEdit) (*operations.TreeEdit, error) {
+	if pbTreeEdit == nil {
+		return nil, goerrors.New("operation tree_edit missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbTreeEdit.ParentCreatedAt, "tree_edit.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+
+	executedAt, err := fromRequiredTimeTicket(pbTreeEdit.ExecutedAt, "tree_edit.executed_at")
+	if err != nil {
+		return nil, err
+	}
+
+	from, err := fromTreePos(pbTreeEdit.From)
+	if err != nil {
+		return nil, err
+	}
+
+	to, err := fromTreePos(pbTreeEdit.To)
+	if err != nil {
+		return nil, err
+	}
+
+	nodes, err := FromTreeNodesWhenEdit(pbTreeEdit.Contents)
+	if err != nil {
+		return nil, err
+	}
+
+	restoreSpans, err := fromTreeRestoreSpans(pbTreeEdit.RestoreSpans)
+	if err != nil {
+		return nil, err
+	}
+	retombstoneSpans, err := fromTreeRestoreSpans(pbTreeEdit.RetombstoneSpans)
+	if err != nil {
+		return nil, err
+	}
+	// A restore payload and a restore mode only mean anything together, so
+	// reject either one without the other. Without this, Execute's span-based
+	// guard falls through to the ordinary edit path: spans without a mode are
+	// silently dropped, and a mode without spans applies from/to as a range
+	// DELETION under a "restore" label (also discarding contents/split_level).
+	// Neither is something a well-formed client sends.
+	mode := fromRestoreMode(pbTreeEdit.RestoreMode)
+	hasMode := mode != crdt.RestoreModeNone
+	hasSpans := len(restoreSpans) > 0 || len(retombstoneSpans) > 0
+	if hasMode != hasSpans {
+		return nil, ErrInvalidRestoreSpan
+	}
+	if hasMode {
+		return operations.NewRestoreTreeEdit(
+			parentCreatedAt,
+			from,
+			to,
+			executedAt,
+			restoreSpans,
+			mode,
+			retombstoneSpans,
+		), nil
+	}
+
+	// A split level counts the element boundaries the edit creates, so a
+	// negative one is meaningless. It used to be inert -- nothing read it
+	// beyond the split loop, which does nothing for a non-positive level --
+	// but it now also sizes the boundary-deletion reverse
+	// (operations.TreeEdit.toSplitReverseOperation), where a negative would
+	// build an inverted range. Rejected at the boundary instead.
+	if pbTreeEdit.SplitLevel < 0 {
+		return nil, ErrInvalidSplitLevel
+	}
+
+	edit := operations.NewTreeEdit(
+		parentCreatedAt,
+		from,
+		to,
+		nodes,
+		int(pbTreeEdit.SplitLevel),
+		executedAt,
+	)
+
+	// Each entry becomes a split node's CreatedAt, which crdt.Tree keys
+	// NodeMapByID on and compares -- so an absent one is not a tolerable gap in
+	// the list but a nil TreeNodeID.CreatedAt that faults during the split.
+	var splitTickets []*time.Ticket
+	for _, pbTicket := range pbTreeEdit.SplitTickets {
+		ticket, err := fromRequiredTimeTicket(pbTicket, "tree_edit.split_tickets")
+		if err != nil {
+			return nil, err
+		}
+		splitTickets = append(splitTickets, ticket)
+	}
+	edit.SetSplitTickets(splitTickets)
+
+	return edit, nil
+}
+
+func fromTreeStyle(pbTreeStyle *api.Operation_TreeStyle) (*operations.TreeStyle, error) {
+	if pbTreeStyle == nil {
+		return nil, goerrors.New("operation tree_style missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbTreeStyle.ParentCreatedAt, "tree_style.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+
+	executedAt, err := fromRequiredTimeTicket(pbTreeStyle.ExecutedAt, "tree_style.executed_at")
+	if err != nil {
+		return nil, err
+	}
+
+	from, err := fromTreePos(pbTreeStyle.From)
+	if err != nil {
+		return nil, err
+	}
+
+	to, err := fromTreePos(pbTreeStyle.To)
+	if err != nil {
+		return nil, err
+	}
+
+	// A TreeStyle operation's wire form always carries both Attributes and
+	// AttributesToRemove (see toTreeStyle), and JS's TreeStyleOperation
+	// constructor always accepts both -- so decoding whichever field is
+	// non-empty is not exclusive. A reverse TreeStyle built for undo/redo
+	// can populate both at once (restore some keys, remove others that did
+	// not exist before), and decoding only one would silently drop the
+	// other.
+	if len(pbTreeStyle.Attributes) > 0 && len(pbTreeStyle.AttributesToRemove) > 0 {
+		return operations.NewTreeStyleSetAndRemove(
+			parentCreatedAt,
+			from,
+			to,
+			pbTreeStyle.Attributes,
+			pbTreeStyle.AttributesToRemove,
+			executedAt,
+		), nil
+	}
+
+	if len(pbTreeStyle.AttributesToRemove) > 0 {
+		return operations.NewTreeStyleRemove(
+			parentCreatedAt,
+			from,
+			to,
+			pbTreeStyle.AttributesToRemove,
+			executedAt,
+		), nil
+	}
+
+	return operations.NewTreeStyle(
+		parentCreatedAt,
+		from,
+		to,
+		pbTreeStyle.Attributes,
+		executedAt,
+	), nil
+}
+
+func fromArraySet(pbSetByIndex *api.Operation_ArraySet) (*operations.ArraySet, error) {
+	if pbSetByIndex == nil {
+		return nil, goerrors.New("operation array_set missing")
+	}
+
+	parentCreatedAt, err := fromRequiredTimeTicket(pbSetByIndex.ParentCreatedAt, "array_set.parent_created_at")
+	if err != nil {
+		return nil, err
+	}
+	createdAt, err := fromRequiredTimeTicket(pbSetByIndex.CreatedAt, "array_set.created_at")
+	if err != nil {
+		return nil, err
+	}
+	elem, err := fromElement(pbSetByIndex.Value)
+	if err != nil {
+		return nil, err
+	}
+	executedAt, err := fromRequiredTimeTicket(pbSetByIndex.ExecutedAt, "array_set.executed_at")
+	if err != nil {
+		return nil, err
+	}
+	return operations.NewArraySet(
+		parentCreatedAt,
+		createdAt,
+		elem,
+		executedAt,
+	), nil
+}
+
+func fromTextNodePos(
+	pbPos *api.TextNodePos,
+) (*crdt.RGATreeSplitNodePos, error) {
+	if pbPos == nil {
+		return nil, goerrors.New("text node pos missing")
+	}
+
+	createdAt, err := fromTimeTicket(pbPos.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if createdAt == nil {
+		return nil, fmt.Errorf("text_node_pos.created_at: %w", ErrMissingTicket)
+	}
+
+	return crdt.NewRGATreeSplitNodePos(
+		crdt.NewRGATreeSplitNodeID(createdAt, int(pbPos.Offset)),
+		int(pbPos.RelativeOffset),
+	), nil
+}
+
+// FromTreeNodes converts protobuf tree nodes to crdt.TreeNode. The last node
+// in the slice is the root node, because the slice is in post-order.
+func FromTreeNodes(pbNodes []*api.TreeNode) (*crdt.TreeNode, error) {
+	if len(pbNodes) == 0 {
+		return nil, nil
+	}
+
+	nodes := make([]*crdt.TreeNode, len(pbNodes))
+	for i, pbNode := range pbNodes {
+		if pbNode == nil {
+			return nil, goerrors.New("tree node missing")
+		}
+
+		node, err := fromTreeNode(pbNode)
+		if err != nil {
+			return nil, err
+		}
+		nodes[i] = node
+	}
+
+	root := nodes[len(nodes)-1]
+	depthTable := make(map[int32]*crdt.TreeNode)
+	depthTable[pbNodes[len(nodes)-1].Depth] = nodes[len(nodes)-1]
+	for i := len(nodes) - 2; i >= 0; i-- {
+		var parent = depthTable[pbNodes[i].Depth-1]
+		if parent == nil {
+			return nil, goerrors.New("tree node parent missing")
+		}
+
+		if err := parent.Prepend(nodes[i]); err != nil {
+			return nil, err
+		}
+		depthTable[pbNodes[i].Depth] = nodes[i]
+	}
+
+	root.Index.UpdateDescendantsLength()
+	root.Index.UpdateDescendantsLength(true)
+
+	// build crdt.Tree from root to construct the links between nodes.
+	return crdt.NewTree(root, nil).Root(), nil
+}
+
+// FromTreeNodesWhenEdit converts protobuf tree nodes to array of crdt.TreeNode.
+// in each element in array, the last node in slice is the root node, because the slice is in post-order.
+func FromTreeNodesWhenEdit(pbNodes []*api.TreeNodes) ([]*crdt.TreeNode, error) {
+	if len(pbNodes) == 0 {
+		return nil, nil
+	}
+
+	var treeNodes []*crdt.TreeNode
+
+	for _, pbNode := range pbNodes {
+		if pbNode == nil {
+			return nil, goerrors.New("tree edit content missing")
+		}
+
+		treeNode, err := FromTreeNodes(pbNode.Content)
+
+		if err != nil {
+			return nil, err
+		}
+
+		// FromTreeNodes reports an empty content list as a nil root, and every
+		// group ToTreeNodesWhenEdit writes holds at least the root of one
+		// content node. Reject the empty group rather than carry the nil into
+		// the operation: TreeEdit.Execute dereferences each content to deep-
+		// copy it, so a nil in the slice is a panic on apply -- in the server
+		// handling the change, and on every replica it is forwarded to.
+		if treeNode == nil {
+			return nil, goerrors.New("tree edit content missing")
+		}
+
+		// Operation content is fully client-controlled and is always freshly
+		// created by the editing client, so it can never be a split product,
+		// carry a merge lineage, or arrive already tombstoned -- Tree.Edit
+		// stamps MergedFrom/MergedAt on the content it inserts from the merge
+		// parent it resolves locally, and tombstones it itself when the parent
+		// it lands in is removed. Drop the engine-only links and the tombstone
+		// the wire format carries anyway: the tree follows the links as trusted
+		// structural pointers once Tree.Edit registers these nodes in
+		// NodeMapByID, and a node born tombstoned under a live parent is
+		// counted as live content that no GC pair will ever collect.
+		treeNode.DropEngineOnlyLinks()
+		treeNode.ClearTombstones()
+
+		treeNodes = append(treeNodes, treeNode)
+	}
+
+	return treeNodes, nil
+}
+
+func fromRHT(pbRHT map[string]*api.NodeAttr) (*crdt.RHT, error) {
+	rht := crdt.NewRHT()
+	for k, pbAttr := range pbRHT {
+		if pbAttr == nil {
+			return nil, goerrors.New("tree node attribute missing")
+		}
+
+		updatedAt, err := fromTimeTicket(pbAttr.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		// An attribute's updatedAt is what RHTNode.IDString is built from, and
+		// NewRoot reads it to key the GC pair a removed attribute registers.
+		// fromTimeTicket returns nil for an absent ticket, so accepting one
+		// here would fault on every later load of the document rather than on
+		// the bytes that carried it.
+		if updatedAt == nil {
+			return nil, goerrors.New("tree node attribute missing updatedAt")
+		}
+		// SetInternal drops the value of a removed attribute: a payload written
+		// before Remove stopped copying it still carries one, and restoring it
+		// would size the tombstone differently from a replica that performed
+		// the removal under the current code. See RHT.SetInternal.
+		rht.SetInternal(k, pbAttr.Value, updatedAt, pbAttr.IsRemoved)
+	}
+	return rht, nil
+}
+
+func fromTreeNode(pbNode *api.TreeNode) (*crdt.TreeNode, error) {
+	if pbNode == nil {
+		return nil, goerrors.New("tree node missing")
+	}
+
+	id, err := fromTreeNodeID(pbNode.Id)
+	if err != nil {
+		return nil, err
+	}
+
+	attrs, err := fromRHT(pbNode.Attributes)
+	if err != nil {
+		return nil, err
+	}
+
+	node := crdt.NewTreeNode(
+		id,
+		pbNode.Type,
+		attrs,
+		pbNode.Value,
+	)
+
+	if pbNode.GetInsPrevId() != nil {
+		node.InsPrevID, err = fromTreeNodeID(pbNode.GetInsPrevId())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if pbNode.GetInsNextId() != nil {
+		node.InsNextID, err = fromTreeNodeID(pbNode.GetInsNextId())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if pbNode.GetMergedFrom() != nil {
+		node.MergedFrom, err = fromTreeNodeID(pbNode.GetMergedFrom())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if pbNode.GetMergedAt() != nil {
+		node.MergedAt, err = fromTimeTicket(pbNode.GetMergedAt())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	removedAt, err := fromTimeTicket(pbNode.RemovedAt)
+	if err != nil {
+		return nil, err
+	}
+	node.SetRemovedAt(removedAt)
+
+	return node, nil
+}
+
+func fromTreePos(pbPos *api.TreePos) (*crdt.TreePos, error) {
+	if pbPos == nil {
+		return nil, goerrors.New("tree position missing")
+	}
+
+	parentID, err := fromTreeNodeID(pbPos.ParentId)
+	if err != nil {
+		return nil, err
+	}
+
+	leftSiblingID, err := fromTreeNodeID(pbPos.LeftSiblingId)
+	if err != nil {
+		return nil, err
+	}
+
+	return crdt.NewTreePos(parentID, leftSiblingID), nil
+}
+
+// fromTreeNodeID converts a Protobuf TreeNodeID that names an identity: a
+// node's own ID, an insertion neighbor, a merge source, or either half of a
+// TreePos. The offset is passed through unchanged. Rejecting a negative one
+// here would also reject it on the stored-change and snapshot paths, which
+// share this decoder, and make a document already holding one undecodable.
+// Only a restore span's left anchor is coerced; see fromTreeRestoreAnchorID.
+func fromTreeNodeID(pbPos *api.TreeNodeID) (*crdt.TreeNodeID, error) {
+	createdAt, err := fromTreeNodeIDCreatedAt(pbPos)
+	if err != nil {
+		return nil, err
+	}
+
+	return crdt.NewTreeNodeID(
+		createdAt,
+		int(pbPos.Offset),
+	), nil
+}
+
+// fromTreeRestoreAnchorID converts the one TreeNodeID on the wire that a
+// well-formed producer can have written with a negative offset:
+// crdt.leftAnchorID computes a restore span's left anchor as
+// `start + length - 1`, which for an empty text node lands one code unit
+// before the node's own start. That guard is producer-side only -- a peer that
+// does not carry it, and a span already persisted by one, still deliver the
+// negative -- and crdt.Tree.Restore floor-resolves the anchor with no bound of
+// its own, landing the restored node after some earlier run entirely.
+//
+// Floored rather than rejected: this decoder also runs over stored operations
+// (FromStoredOperations), so refusing the value would make a document that
+// already contains one permanently unrebuildable. Zero is the anchor the guard
+// would have produced -- it floor-resolves to the leftmost fragment of the
+// same run, which is the node itself -- and it keeps negative offsets out of
+// the offset arithmetic downstream. An anchor is resolved by position rather
+// than looked up by identity, so the coercion cannot merge two nodes the way
+// flooring an identity ID in fromTreeNodeID would.
+//
+// Only the offset-zero case is repaired. An empty text node at offset k > 0
+// yields k - 1, which is not negative and is decoded as sent: telling it
+// apart from a valid anchor needs the node's length, which the decoder does
+// not have.
+func fromTreeRestoreAnchorID(pbPos *api.TreeNodeID) (*crdt.TreeNodeID, error) {
+	createdAt, err := fromTreeNodeIDCreatedAt(pbPos)
+	if err != nil {
+		return nil, err
+	}
+
+	return crdt.NewTreeNodeID(
+		createdAt,
+		max(int(pbPos.Offset), 0),
+	), nil
+}
+
+// fromTreeNodeIDCreatedAt decodes the creation ticket every TreeNodeID
+// carries, shared by the identity and anchor decoders above.
+func fromTreeNodeIDCreatedAt(pbPos *api.TreeNodeID) (*time.Ticket, error) {
+	if pbPos == nil {
+		return nil, goerrors.New("tree node id missing")
+	}
+
+	createdAt, err := fromTimeTicket(pbPos.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if createdAt == nil {
+		return nil, fmt.Errorf("tree_node_id.created_at: %w", ErrMissingTicket)
+	}
+
+	return createdAt, nil
+}
+
+// fromTreeRestoreSpans converts Protobuf identity-preserving Tree restore
+// spans to model format. A span addresses content by insertion identity, so a
+// missing id/parent_id created_at is malformed and rejected (parity with the
+// Text restore span read path).
+func fromTreeRestoreSpans(pbSpans []*api.TreeRestoreSpan) ([]*crdt.TreeRestoreSpan, error) {
+	if len(pbSpans) == 0 {
+		return nil, nil
+	}
+	spans := make([]*crdt.TreeRestoreSpan, 0, len(pbSpans))
+	for _, pbSpan := range pbSpans {
+		if pbSpan == nil || pbSpan.Id == nil {
+			return nil, ErrInvalidRestoreSpan
+		}
+		id, err := fromTreeNodeID(pbSpan.Id)
+		if err != nil {
+			return nil, err
+		}
+		if id.CreatedAt == nil {
+			return nil, ErrInvalidRestoreSpan
+		}
+		// A text span's Length is the UTF-16 code-unit count of Value; the
+		// recreate path slices Value by [0, Length), so a mismatched (or
+		// negative) Length from crafted input would slice out of bounds.
+		// Reject it here (parity with fromRestoreSpans' Content-length check).
+		if pbSpan.Length < 0 {
+			return nil, ErrInvalidRestoreSpan
+		}
+		if pbSpan.IsText && int(pbSpan.Length) != len(utf16.Encode([]rune(pbSpan.Value))) {
+			return nil, ErrInvalidRestoreSpan
+		}
+		var attrs *crdt.RHT
+		if len(pbSpan.Attributes) > 0 {
+			// An attribute snapshot is malformed without an updatedAt: fromRHT
+			// stores whatever fromTimeTicket returns, which is nil for a nil
+			// ticket rather than an error, so a crafted nil here would reach
+			// the RHT with a nil updatedAt and panic on the first comparison
+			// deep inside the restore path. Reject it here instead (parity
+			// with the id/parent/sibling created_at checks below, and with
+			// the JS converter's fromPbTreeRestoreSpan).
+			for _, attr := range pbSpan.Attributes {
+				if attr == nil || attr.UpdatedAt == nil {
+					return nil, ErrInvalidRestoreSpan
+				}
+			}
+			attrs, err = fromRHT(pbSpan.Attributes)
+			if err != nil {
+				return nil, err
+			}
+		}
+		span := &crdt.TreeRestoreSpan{
+			ID:         id,
+			NodeType:   pbSpan.NodeType,
+			IsText:     pbSpan.IsText,
+			Length:     int(pbSpan.Length),
+			Value:      pbSpan.Value,
+			Attributes: attrs,
+		}
+		if pbSpan.ParentId != nil {
+			span.ParentID, err = fromTreeNodeID(pbSpan.ParentId)
+			if err != nil {
+				return nil, err
+			}
+			if span.ParentID.CreatedAt == nil {
+				return nil, ErrInvalidRestoreSpan
+			}
+		}
+		if pbSpan.LeftSiblingId != nil {
+			// The anchor decoder, not the identity one: a left anchor is the
+			// single wire value a well-formed producer can have written
+			// negative, and it is resolved by position rather than keyed by
+			// identity. Every other ID on the span stays strict.
+			if span.LeftSiblingID, err = fromTreeRestoreAnchorID(pbSpan.LeftSiblingId); err != nil {
+				return nil, err
+			}
+			if span.LeftSiblingID.CreatedAt == nil {
+				return nil, ErrInvalidRestoreSpan
+			}
+		}
+		if pbSpan.RightSiblingId != nil {
+			if span.RightSiblingID, err = fromTreeNodeID(pbSpan.RightSiblingId); err != nil {
+				return nil, err
+			}
+			if span.RightSiblingID.CreatedAt == nil {
+				return nil, ErrInvalidRestoreSpan
+			}
+		}
+		spans = append(spans, span)
+	}
+	return spans, nil
+}
+
+func fromTimeTicket(pbTicket *api.TimeTicket) (*time.Ticket, error) {
+	if pbTicket == nil {
+		return nil, nil
+	}
+
+	actorID, err := time.ActorIDFromBytes(pbTicket.ActorId)
+	if err != nil {
+		return nil, err
+	}
+	return time.NewTicket(
+		pbTicket.Lamport,
+		pbTicket.Delimiter,
+		actorID,
+	), nil
+}
+
+// fromRequiredTimeTicket decodes a ticket that a well-formed operation always
+// carries. fromTimeTicket maps an absent ticket to (nil, nil), and the
+// execution paths dereference these without checking -- Root.FindByCreatedAt
+// and Ticket.After both do -- so a nil one decoded from client-supplied input
+// panics server-side. Worse, a pushed change is persisted before anything
+// executes it and is replayed later by the background snapshot goroutine, so
+// the panic repeats. Reject the nil at the converter boundary instead.
+func fromRequiredTimeTicket(pbTicket *api.TimeTicket, field string) (*time.Ticket, error) {
+	ticket, err := fromTimeTicket(pbTicket)
+	if err != nil {
+		return nil, err
+	}
+	if ticket == nil {
+		return nil, fmt.Errorf("%s: %w", field, ErrMissingTicket)
+	}
+	return ticket, nil
+}
+
+// sanitizeElement adapts a BytesTo* result: it drops the split-sibling links
+// from every tree the decoded element carries, or passes the error through.
+func sanitizeElement[T crdt.Element](elem T, err error) (crdt.Element, error) {
+	if err != nil {
+		return nil, err
+	}
+	if err := checkRemovalEvents(elem); err != nil {
+		return nil, err
+	}
+
+	crdt.DropSplitLinksInElement(elem)
+
+	return elem, nil
+}
+
+// maxTextRemovalEvents bounds how many removal events one text node may carry
+// in an element payload a client pushes. A piece's ledger holds a removal and
+// its cancel per actor concurrently editing it, and GC prunes the pairs every
+// replica knows, so a payload that reaches this was written to be refused.
+//
+// Only operation payloads are bounded. A snapshot is decoded without one: its
+// ledgers are the ones its writer's rules grew, which can pass this while a
+// peer lags behind GC, and a snapshot the server cannot read back makes the
+// document unloadable.
+const maxTextRemovalEvents = 1 << 12
+
+// checkRemovalEvents refuses an element payload holding a text node whose
+// removal ledger exceeds maxTextRemovalEvents.
+func checkRemovalEvents(elem crdt.Element) error {
+	switch e := elem.(type) {
+	case *crdt.Text:
+		for _, node := range e.Nodes() {
+			if n := len(node.RemovalEvents()); n > maxTextRemovalEvents {
+				return fmt.Errorf(
+					"%d removal events on a text node exceeds %d: %w",
+					n, maxTextRemovalEvents, ErrUnsupportedElement,
+				)
+			}
+		}
+	case *crdt.Object:
+		for _, node := range e.RHTNodes() {
+			if err := checkRemovalEvents(node.Element()); err != nil {
+				return err
+			}
+		}
+	case *crdt.Array:
+		for _, node := range e.AllRGANodes() {
+			if err := checkRemovalEvents(node.Element()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// fromElement decodes the element an operation carries as its payload.
+//
+// The element's own createdAt is as load-bearing as the operation's tickets:
+// ElementRHT and RGATreeList key on it (v.CreatedAt().Key()), so an absent one
+// is a nil dereference the moment the operation is applied -- server-side, in
+// the background snapshot goroutine, on every later replay of the change. It is
+// required here for the same reason fromRequiredTimeTicket exists.
+func fromElement(pbElement *api.JSONElementSimple) (crdt.Element, error) {
+	if pbElement == nil {
+		return nil, ErrUnsupportedElement
+	}
+
+	switch pbType := pbElement.Type; pbType {
+	case api.ValueType_VALUE_TYPE_JSON_OBJECT:
+		if pbElement.Value == nil {
+			createdAt, err := fromRequiredTimeTicket(pbElement.CreatedAt, "element.created_at")
+			if err != nil {
+				return nil, err
+			}
+			return crdt.NewObject(
+				crdt.NewElementRHT(),
+				createdAt,
+			), nil
+		}
+		return sanitizeElement(BytesToObject(pbElement.Value))
+	case api.ValueType_VALUE_TYPE_JSON_ARRAY:
+		if pbElement.Value == nil {
+			createdAt, err := fromRequiredTimeTicket(pbElement.CreatedAt, "element.created_at")
+			if err != nil {
+				return nil, err
+			}
+			elements := crdt.NewRGATreeList()
+			return crdt.NewArray(elements, createdAt), nil
+		}
+		return sanitizeElement(BytesToArray(pbElement.Value))
+	case api.ValueType_VALUE_TYPE_NULL:
+		fallthrough
+	case api.ValueType_VALUE_TYPE_BOOLEAN:
+		fallthrough
+	case api.ValueType_VALUE_TYPE_INTEGER:
+		fallthrough
+	case api.ValueType_VALUE_TYPE_LONG:
+		fallthrough
+	case api.ValueType_VALUE_TYPE_DOUBLE:
+		fallthrough
+	case api.ValueType_VALUE_TYPE_STRING:
+		fallthrough
+	case api.ValueType_VALUE_TYPE_BYTES:
+		fallthrough
+	case api.ValueType_VALUE_TYPE_DATE:
+		valueType, err := fromPrimitiveValueType(pbElement.Type)
+		if err != nil {
+			return nil, err
+		}
+		createdAt, err := fromRequiredTimeTicket(pbElement.CreatedAt, "element.created_at")
+		if err != nil {
+			return nil, err
+		}
+		value, err := crdt.ValueFromBytes(valueType, pbElement.Value)
+		if err != nil {
+			return nil, err
+		}
+		primitive, err := crdt.NewPrimitive(value, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		return primitive, nil
+	case api.ValueType_VALUE_TYPE_TEXT:
+		createdAt, err := fromRequiredTimeTicket(pbElement.CreatedAt, "element.created_at")
+		if err != nil {
+			return nil, err
+		}
+		return crdt.NewText(
+			crdt.NewRGATreeSplit(crdt.InitialTextNode()),
+			createdAt,
+		), nil
+	case api.ValueType_VALUE_TYPE_INTEGER_CNT,
+		api.ValueType_VALUE_TYPE_LONG_CNT,
+		api.ValueType_VALUE_TYPE_INTEGER_DEDUP_CNT:
+		counterType, err := fromCounterType(pbType)
+		if err != nil {
+			return nil, err
+		}
+		createdAt, err := fromRequiredTimeTicket(pbElement.CreatedAt, "element.created_at")
+		if err != nil {
+			return nil, err
+		}
+		counterValue, err := crdt.CounterValueFromBytes(counterType, pbElement.Value)
+		if err != nil {
+			return nil, err
+		}
+
+		counter, err := crdt.NewCounter(
+			counterType,
+			counterValue,
+			createdAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return counter, nil
+	case api.ValueType_VALUE_TYPE_TREE:
+		return sanitizeElement(BytesToTree(pbElement.Value))
+	}
+
+	return nil, fmt.Errorf("%d, %w", pbElement.Type, ErrUnsupportedElement)
+}
+
+func fromPrimitiveValueType(valueType api.ValueType) (crdt.ValueType, error) {
+	switch valueType {
+	case api.ValueType_VALUE_TYPE_NULL:
+		return crdt.Null, nil
+	case api.ValueType_VALUE_TYPE_BOOLEAN:
+		return crdt.Boolean, nil
+	case api.ValueType_VALUE_TYPE_INTEGER:
+		return crdt.Integer, nil
+	case api.ValueType_VALUE_TYPE_LONG:
+		return crdt.Long, nil
+	case api.ValueType_VALUE_TYPE_DOUBLE:
+		return crdt.Double, nil
+	case api.ValueType_VALUE_TYPE_STRING:
+		return crdt.String, nil
+	case api.ValueType_VALUE_TYPE_BYTES:
+		return crdt.Bytes, nil
+	case api.ValueType_VALUE_TYPE_DATE:
+		return crdt.Date, nil
+	}
+
+	return 0, fmt.Errorf("%d, %w", valueType, ErrUnsupportedValueType)
+}
+
+func fromCounterType(valueType api.ValueType) (crdt.CounterType, error) {
+	switch valueType {
+	case api.ValueType_VALUE_TYPE_INTEGER_CNT:
+		return crdt.IntegerCnt, nil
+	case api.ValueType_VALUE_TYPE_LONG_CNT:
+		return crdt.LongCnt, nil
+	case api.ValueType_VALUE_TYPE_INTEGER_DEDUP_CNT:
+		return crdt.IntegerDedupCnt, nil
+	}
+
+	return 0, fmt.Errorf("%d, %w", valueType, ErrUnsupportedCounterType)
+}
+
+// FromUpdatableProjectFields converts the given Protobuf formats to model format.
+func FromUpdatableProjectFields(pbProjectFields *api.UpdatableProjectFields) (*types.UpdatableProjectFields, error) {
+	updatableProjectFields := &types.UpdatableProjectFields{}
+	if pbProjectFields.Name != nil {
+		updatableProjectFields.Name = &pbProjectFields.Name.Value
+	}
+	if pbProjectFields.AuthWebhookUrl != nil {
+		updatableProjectFields.AuthWebhookURL = &pbProjectFields.AuthWebhookUrl.Value
+	}
+	if pbProjectFields.AuthWebhookMethods != nil {
+		updatableProjectFields.AuthWebhookMethods = &pbProjectFields.AuthWebhookMethods.Methods
+	}
+	if pbProjectFields.AuthWebhookMaxRetries != nil {
+		value := uint64(pbProjectFields.AuthWebhookMaxRetries.Value)
+		updatableProjectFields.AuthWebhookMaxRetries = &value
+	}
+	if pbProjectFields.AuthWebhookMinWaitInterval != nil {
+		updatableProjectFields.AuthWebhookMinWaitInterval = &pbProjectFields.AuthWebhookMinWaitInterval.Value
+	}
+	if pbProjectFields.AuthWebhookMaxWaitInterval != nil {
+		updatableProjectFields.AuthWebhookMaxWaitInterval = &pbProjectFields.AuthWebhookMaxWaitInterval.Value
+	}
+	if pbProjectFields.AuthWebhookRequestTimeout != nil {
+		updatableProjectFields.AuthWebhookRequestTimeout = &pbProjectFields.AuthWebhookRequestTimeout.Value
+	}
+	if pbProjectFields.EventWebhookUrl != nil {
+		updatableProjectFields.EventWebhookURL = &pbProjectFields.EventWebhookUrl.Value
+	}
+	if pbProjectFields.EventWebhookEvents != nil {
+		updatableProjectFields.EventWebhookEvents = &pbProjectFields.EventWebhookEvents.Events
+	}
+	if pbProjectFields.EventWebhookMaxRetries != nil {
+		value := uint64(pbProjectFields.EventWebhookMaxRetries.Value)
+		updatableProjectFields.EventWebhookMaxRetries = &value
+	}
+	if pbProjectFields.EventWebhookMinWaitInterval != nil {
+		updatableProjectFields.EventWebhookMinWaitInterval = &pbProjectFields.EventWebhookMinWaitInterval.Value
+	}
+	if pbProjectFields.EventWebhookMaxWaitInterval != nil {
+		updatableProjectFields.EventWebhookMaxWaitInterval = &pbProjectFields.EventWebhookMaxWaitInterval.Value
+	}
+	if pbProjectFields.EventWebhookRequestTimeout != nil {
+		updatableProjectFields.EventWebhookRequestTimeout = &pbProjectFields.EventWebhookRequestTimeout.Value
+	}
+	if pbProjectFields.ClientDeactivateThreshold != nil {
+		updatableProjectFields.ClientDeactivateThreshold = &pbProjectFields.ClientDeactivateThreshold.Value
+	}
+	if pbProjectFields.ChannelSessionTtl != nil {
+		updatableProjectFields.ChannelSessionTTL = &pbProjectFields.ChannelSessionTtl.Value
+	}
+	if pbProjectFields.SnapshotThreshold != nil {
+		value := int64(pbProjectFields.SnapshotThreshold.Value)
+		updatableProjectFields.SnapshotThreshold = &value
+	}
+	if pbProjectFields.SnapshotInterval != nil {
+		value := int64(pbProjectFields.SnapshotInterval.Value)
+		updatableProjectFields.SnapshotInterval = &value
+	}
+	if pbProjectFields.MaxSubscribersPerDocument != nil {
+		value := int(pbProjectFields.MaxSubscribersPerDocument.Value)
+		updatableProjectFields.MaxSubscribersPerDocument = &value
+	}
+	if pbProjectFields.MaxAttachmentsPerDocument != nil {
+		value := int(pbProjectFields.MaxAttachmentsPerDocument.Value)
+		updatableProjectFields.MaxAttachmentsPerDocument = &value
+	}
+	if pbProjectFields.MaxSizePerDocument != nil {
+		value := int(pbProjectFields.MaxSizePerDocument.Value)
+		updatableProjectFields.MaxSizePerDocument = &value
+	}
+	if pbProjectFields.RemoveOnDetach != nil {
+		updatableProjectFields.RemoveOnDetach = &pbProjectFields.RemoveOnDetach.Value
+	}
+	if pbProjectFields.AutoRevisionEnabled != nil {
+		updatableProjectFields.AutoRevisionEnabled = &pbProjectFields.AutoRevisionEnabled.Value
+	}
+	if pbProjectFields.AllowedOrigins != nil {
+		updatableProjectFields.AllowedOrigins = &pbProjectFields.AllowedOrigins.Origins
+	}
+
+	return updatableProjectFields, nil
+}
+
+// FromDateRange converts the given Protobuf formats to model format.
+func FromDateRange(
+	pbRange api.GetProjectStatsRequest_DateRange,
+) (gotime.Time, gotime.Time, error) {
+	// NOTE(hackerwins): The end time is exclusive in the query. So, we need to
+	// add 1 day to the end time.
+	var from, to gotime.Time
+	now := gotime.Now()
+
+	switch pbRange {
+	case api.GetProjectStatsRequest_DATE_RANGE_LAST_1W:
+		from = now.AddDate(0, 0, -7)
+		to = now.AddDate(0, 0, 1)
+	case api.GetProjectStatsRequest_DATE_RANGE_LAST_4W:
+		from = now.AddDate(0, 0, -28)
+		to = now.AddDate(0, 0, 1)
+	case api.GetProjectStatsRequest_DATE_RANGE_LAST_3M:
+		from = now.AddDate(0, -3, 0)
+		to = now.AddDate(0, 0, 1)
+	case api.GetProjectStatsRequest_DATE_RANGE_LAST_12M:
+		from = now.AddDate(0, -12, 0)
+		to = now.AddDate(0, 0, 1)
+	default:
+		return from, to, fmt.Errorf("%v, %w", pbRange, ErrUnsupportedDateRange)
+	}
+
+	return from, to, nil
+}
+
+// FromSchemaKey converts the given Protobuf formats to model format.
+func FromSchemaKey(schemaKey string) (string, int, error) {
+	if schemaKey == "" {
+		return "", 0, nil
+	}
+
+	split := strings.Split(schemaKey, "@")
+	if len(split) != 2 {
+		return "", 0, fmt.Errorf("parse schema %s: %w", schemaKey, ErrInvalidSchemaKey)
+	}
+
+	name := split[0]
+	version, err := strconv.Atoi(split[1])
+	if err != nil {
+		return "", 0, fmt.Errorf("parse version %s: %w", split[1], ErrInvalidSchemaKey)
+	}
+
+	return name, version, nil
+}
+
+func FromRules(pbRules []*api.Rule) []types.Rule {
+	var rules []types.Rule
+	for _, pbRule := range pbRules {
+		rules = append(rules, FromRule(pbRule))
+	}
+	return rules
+}
+
+// FromRule converts the given Protobuf formats to model format.
+func FromRule(pbRule *api.Rule) types.Rule {
+	var treeNodes []types.TreeNodeRule
+	for _, tn := range pbRule.TreeNodes {
+		treeNodes = append(treeNodes, types.TreeNodeRule{
+			NodeType: tn.NodeType,
+			Content:  tn.Content,
+			Marks:    tn.Marks,
+			Group:    tn.Group,
+		})
+	}
+	return types.Rule{
+		Path:      pbRule.Path,
+		Type:      pbRule.Type,
+		TreeNodes: treeNodes,
+	}
+}
+
+// FromSchemas converts the given Protobuf formats to model format.
+func FromSchemas(pbSchemas []*api.Schema) []*types.Schema {
+	var schemas []*types.Schema
+	for _, pbSchema := range pbSchemas {
+		schemas = append(schemas, FromSchema(pbSchema))
+	}
+	return schemas
+}
+
+// FromSchema converts the given Protobuf formats to model format.
+func FromSchema(pbSchema *api.Schema) *types.Schema {
+	return &types.Schema{
+		ID:        types.ID(pbSchema.Id),
+		Name:      pbSchema.Name,
+		Version:   int(pbSchema.Version),
+		Body:      pbSchema.Body,
+		Rules:     FromRules(pbSchema.Rules),
+		CreatedAt: pbSchema.CreatedAt.AsTime(),
+	}
+}
+
+// FromCacheType converts the given Protobuf formats to model format.
+func FromCacheType(pbCacheType api.CacheType) types.CacheType {
+	switch pbCacheType {
+	case api.CacheType_CACHE_TYPE_PROJECT:
+		return types.CacheTypeProject
+	case api.CacheType_CACHE_TYPE_CLIENT:
+		return types.CacheTypeClient
+	case api.CacheType_CACHE_TYPE_DOCUMENT:
+		return types.CacheTypeDocument
+	default:
+		return types.CacheTypeUnknown
+	}
+}

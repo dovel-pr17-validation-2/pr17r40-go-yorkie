@@ -1,0 +1,94 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package change
+
+import (
+	"github.com/yorkie-team/yorkie/pkg/document/time"
+	"github.com/yorkie-team/yorkie/pkg/key"
+)
+
+// Pack is a unit for delivering changes in a document to the remote.
+type Pack struct {
+	// DocumentKey is key of the document.
+	DocumentKey key.Key
+
+	// Checkpoint is used to determine the client received changes.
+	Checkpoint Checkpoint
+
+	// Change represents a unit of modification in the document.
+	Changes []*Change
+
+	// Snapshot is a byte array that encode the document.
+	Snapshot []byte
+
+	// VersionVector represents two vectors of the document.
+	// 1. In request, it is the version vector of the document on the client.
+	// 2. In response(Snapshot), it is the version vector of the snapshot of the document.
+	VersionVector time.VersionVector
+
+	// Epoch is the compaction epoch carried in both directions.
+	// 1. In request, it is the client's last-known epoch, presented on resume so
+	//    the server can detect a stale-epoch baseline (see the pull-before-trust
+	//    reconciliation in docs/design/offline-resumable-attach.md).
+	// 2. In response, it is the document's current epoch, so the client can learn
+	//    and persist it for the next resume.
+	Epoch int64
+
+	// IsRemoved is a flag that indicates whether the document is removed.
+	IsRemoved bool
+}
+
+// NewPack creates a new instance of Pack.
+func NewPack(
+	key key.Key,
+	cp Checkpoint,
+	changes []*Change,
+	versionVector time.VersionVector,
+	snapshot []byte,
+) *Pack {
+	return &Pack{
+		DocumentKey:   key,
+		Checkpoint:    cp,
+		Changes:       changes,
+		VersionVector: versionVector,
+		Snapshot:      snapshot,
+	}
+}
+
+// HasChanges returns whether pack has changes or not.
+func (p *Pack) HasChanges() bool {
+	return len(p.Changes) > 0
+}
+
+// ChangesLen returns the size of the changes.
+func (p *Pack) ChangesLen() int {
+	return len(p.Changes)
+}
+
+// OperationsLen returns the size of the operations.
+func (p *Pack) OperationsLen() int {
+	operations := 0
+	for _, c := range p.Changes {
+		operations += len(c.operations)
+	}
+	return operations
+}
+
+// IsAttached returns whether the document is attached or not.
+func (p *Pack) IsAttached() bool {
+	return p.Checkpoint.ServerSeq != 0
+}

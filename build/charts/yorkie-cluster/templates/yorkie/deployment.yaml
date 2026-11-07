@@ -1,0 +1,229 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.yorkie.name }}
+  namespace: {{ .Values.yorkie.namespace }}
+  labels:
+    app: {{ .Values.yorkie.name }}
+    app.kubernetes.io/name: {{ .Values.yorkie.name }}
+    app.kubernetes.io/instance: {{ .Values.yorkie.name }}
+    app.kubernetes.io/version: {{ .Values.yorkie.image.tag | default .Chart.AppVersion }}
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: {{ .Values.yorkie.name }}
+    app.kubernetes.io/managed-by: istio
+    version: {{ .Values.yorkie.image.tag | default .Chart.AppVersion }}
+spec:
+  {{ if not .Values.yorkie.autoscaling.enabled }}
+  replicas: {{ .Values.yorkie.autoscaling.replicaCount }}
+  {{ end }}
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Values.yorkie.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.yorkie.name }}
+        app.kubernetes.io/instance: {{ .Values.yorkie.name }}
+        app.kubernetes.io/version: {{ .Values.yorkie.image.tag | default .Chart.AppVersion }}
+        version: {{ .Values.yorkie.image.tag | default .Chart.AppVersion }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.yorkie.ports.profilingPort }}"
+        prometheus.io/path: "/metrics"
+        {{- /*
+        No checksum of the signing key here, by design: a pod annotation is
+        readable with `get pods`, which is a far weaker permission than
+        `get secrets`, and a hash of the key is enough to search for it
+        offline. Rotating the key is a `rollout restart` instead; see the
+        chart README.
+        */}}
+        {{- with .Values.yorkie.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{ if index .Values "mongodb" "enabled"}}
+      initContainers:
+      - name: wait-for-mongodb-ready
+        image: bitnami/kubectl:latest
+        command:
+          - /bin/sh
+          - -c
+          - |
+            echo "Waiting for MongoDB to be ready..."
+            while true; do
+              # Check if PerconaServerMongoDB resource is ready
+              status=$(kubectl get psmdb -n $NAMESPACE {{ index .Values "yorkie-mongodb" "fullnameOverride" }} -o jsonpath='{.status.state}' 2>/dev/null || echo "NotFound")
+              if [ "$status" = "ready" ]; then
+                echo "MongoDB cluster is ready!"
+                break
+              fi
+              echo "Current status: $status. Waiting..."
+              sleep 10
+            done
+        env:
+          - name: NAMESPACE
+            value: "{{ .Values.yorkie.namespace }}"
+      serviceAccountName: yorkie-db-provisioning-job-account
+      {{ end }}
+      containers:
+      - name: yorkie
+        image: "{{ .Values.yorkie.image.repository }}:{{ .Values.yorkie.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.yorkie.image.pullPolicy }}
+        env:
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          # The credentials are read from the environment rather than given as
+          # args: an arg shows up in /proc/<pid>/cmdline and in
+          # `kubectl get pod -o yaml`. The server refuses the pprof
+          # `/debug/pprof/cmdline` endpoint, so that reader is closed, but
+          # pprof is enabled below and the profiling port is unauthenticated.
+          - name: YORKIE_BACKEND_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.yorkie.args.secretKeyExistingSecret | default (printf "%s-credentials" .Values.yorkie.name) }}
+                key: secret-key
+          - name: YORKIE_MONGO_CONNECTION_URI
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.yorkie.name }}-credentials
+                key: mongo-connection-uri
+          {{- /*
+          Always set: backend-secret-key.yaml fails the render unless one of
+          clusterSecret and clusterSecretExistingSecret holds a value, so one
+          of the two Secrets below always carries `cluster-secret`.
+          */}}
+          - name: YORKIE_CLUSTER_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: {{ trim (toString (.Values.yorkie.args.clusterSecretExistingSecret | default "")) | default (printf "%s-credentials" .Values.yorkie.name) | quote }}
+                key: cluster-secret
+          {{- if .Values.yorkie.args.githubClientSecret }}
+          - name: YORKIE_AUTH_GITHUB_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.yorkie.name }}-credentials
+                key: github-client-secret
+          {{- end }}
+        args: [
+          "server",
+          "--mongo-yorkie-database",
+          "{{ .Values.yorkie.args.dbName }}",
+          "--pprof-enabled",
+          "--rpc-port",
+          "{{ .Values.yorkie.ports.rpcPort }}",
+          "--profiling-port",
+          "{{ .Values.yorkie.ports.profilingPort }}",
+          "--backend-gateway-addr",
+          "{{ .Values.yorkie.name }}-gateway.{{ .Values.yorkie.namespace }}.svc.cluster.local",
+          "--backend-rpc-addr",
+          "$(POD_IP):{{ .Values.yorkie.ports.rpcPort }}",
+          "--backend-use-default-project={{ .Values.yorkie.args.useDefaultProject }}",
+          {{- if .Values.yorkie.logLevel }}
+          "--log-level",
+          "{{ .Values.yorkie.logLevel }}",
+          {{- end }}
+          {{- if .Values.yorkie.mongoMonitoringEnabled }}
+          "--mongo-monitoring-enabled",
+          {{- if .Values.yorkie.mongoMonitoringSlowQueryThreshold }}
+          "--mongo-monitoring-slow-query-threshold",
+          "{{ .Values.yorkie.mongoMonitoringSlowQueryThreshold }}",
+          {{- end }}
+          {{- end }}
+          {{- if .Values.yorkie.args.kafkaAddresses }}
+          "--kafka-addresses",
+          "{{ .Values.yorkie.args.kafkaAddresses }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.kafkaUserEventsTopic }}
+          "--kafka-user-events-topic",
+          "{{ .Values.yorkie.args.kafkaUserEventsTopic }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.kafkaDocumentEventsTopic }}
+          "--kafka-document-events-topic",
+          "{{ .Values.yorkie.args.kafkaDocumentEventsTopic }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.kafkaClientEventsTopic }}
+          "--kafka-client-events-topic",
+          "{{ .Values.yorkie.args.kafkaClientEventsTopic }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.kafkaChannelEventsTopic }}
+          "--kafka-channel-events-topic",
+          "{{ .Values.yorkie.args.kafkaChannelEventsTopic }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.kafkaSessionEventsTopic }}
+          "--kafka-session-events-topic",
+          "{{ .Values.yorkie.args.kafkaSessionEventsTopic }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.kafkaWriteTimeout }}
+          "--kafka-write-timeout",
+          "{{ .Values.yorkie.args.kafkaWriteTimeout }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.githubClientID }}
+          "--auth-github-client-id",
+          "{{ .Values.yorkie.args.githubClientID }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.githubRedirectURL }}
+          "--auth-github-redirect-url",
+          "{{ .Values.yorkie.args.githubRedirectURL }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.githubCallbackRedirectURL }}
+          "--auth-github-callback-redirect-url",
+          "{{ .Values.yorkie.args.githubCallbackRedirectURL }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.githubAuthURL }}
+          "--auth-github-auth-url",
+          "{{ .Values.yorkie.args.githubAuthURL }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.githubTokenURL }}
+          "--auth-github-token-url",
+          "{{ .Values.yorkie.args.githubTokenURL }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.githubDeviceAuthURL }}
+          "--auth-github-device-auth-url",
+          "{{ .Values.yorkie.args.githubDeviceAuthURL }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.githubUserURL }}
+          "--auth-github-user-url",
+          "{{ .Values.yorkie.args.githubUserURL }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.starrocksDSN }}
+          "--starrocks-dsn",
+          "{{ .Values.yorkie.args.starrocksDSN }}",
+          {{- end }}
+          {{- if .Values.yorkie.args.starrocksSummaryEnabled }}
+          "--starrocks-summary-enabled",
+          {{- end }}
+          {{- with .Values.yorkie.housekeeping }}
+          {{- if hasKey . "interval" }}
+          "--housekeeping-interval",
+          "{{ .interval }}",
+          {{- end }}
+          {{- if hasKey . "candidatesLimit" }}
+          "--housekeeping-candidates-limit",
+          "{{ .candidatesLimit }}",
+          {{- end }}
+          {{- if hasKey . "deactivateConcurrency" }}
+          "--housekeeping-deactivate-concurrency",
+          "{{ .deactivateConcurrency }}",
+          {{- end }}
+          {{- if hasKey . "compactionMinChanges" }}
+          "--housekeeping-compaction-min-changes",
+          "{{ .compactionMinChanges }}",
+          {{- end }}
+          {{- if hasKey . "projectStatsRefreshInterval" }}
+          "--housekeeping-project-stats-refresh-interval",
+          "{{ .projectStatsRefreshInterval }}",
+          {{- end }}
+          {{- end }}
+        ]
+        ports:
+          - containerPort: {{ .Values.yorkie.ports.rpcPort }}
+          - containerPort: {{ .Values.yorkie.ports.profilingPort }}
+        livenessProbe:
+          grpc:
+            port: {{ .Values.yorkie.ports.rpcPort }}
+          initialDelaySeconds: 10
+        resources:
+          {{ toYaml .Values.yorkie.resources | nindent 12 }}

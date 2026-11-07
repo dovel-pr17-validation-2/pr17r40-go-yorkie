@@ -1,0 +1,274 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package server_test
+
+import (
+	"os"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/yorkie-team/yorkie/server"
+)
+
+func assertDurationEqual(t *testing.T, expected time.Duration, actual string) {
+	actualDuration, err := time.ParseDuration(actual)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, actualDuration)
+}
+
+func assertDefaultConfig(t *testing.T, conf *server.Config) {
+	err := conf.Validate()
+	assert.NoError(t, err)
+
+	assert.Equal(t, server.DefaultRPCPort, conf.RPC.Port)
+	assert.Equal(t, "", conf.RPC.CertFile)
+	assert.Equal(t, "", conf.RPC.KeyFile)
+	assertDurationEqual(t, server.DefaultRPCReadHeaderTimeout, conf.RPC.ReadHeaderTimeout)
+	assertDurationEqual(t, server.DefaultRPCIdleTimeout, conf.RPC.IdleTimeout)
+
+	assert.Equal(t, server.DefaultGitHubUserURL, conf.RPC.Auth.GitHubUserURL)
+	assert.Equal(t, server.DefaultGitHubDeviceAuthURL, conf.RPC.Auth.GitHubDeviceAuthURL)
+	assert.Equal(t, server.DefaultGitHubTokenURL, conf.RPC.Auth.GitHubTokenURL)
+	assert.Equal(t, server.DefaultGitHubAuthURL, conf.RPC.Auth.GitHubAuthURL)
+
+	assert.Equal(t, server.DefaultProfilingPort, conf.Profiling.Port)
+
+	assertDurationEqual(t, server.DefaultHousekeepingInterval, conf.Housekeeping.Interval)
+	assert.Equal(t, server.DefaultHousekeepingCandidatesLimit, conf.Housekeeping.CandidatesLimit)
+	assert.Equal(t, server.DefaultHousekeepingDeactivateConcurrency, conf.Housekeeping.DeactivateConcurrency)
+	assert.Equal(t, server.DefaultHousekeepingCompactionMinChanges, conf.Housekeeping.CompactionMinChanges)
+
+	assertDurationEqual(t, server.DefaultAdminTokenDuration, conf.Backend.AdminTokenDuration)
+	assert.Equal(t, server.DefaultUseDefaultProject, conf.Backend.UseDefaultProject)
+	assert.Equal(t, server.DefaultSnapshotDisableGC, conf.Backend.SnapshotDisableGC)
+	assert.Equal(t, server.DefaultSnapshotCacheSize, conf.Backend.SnapshotCacheSize)
+	assert.Equal(t, server.DefaultPresenceBaseCacheSize, conf.Backend.PresenceBaseCacheSize)
+
+	assert.Equal(t, server.DefaultAuthWebhookCacheSize, conf.Backend.AuthWebhookCacheSize)
+	assert.False(t, conf.Backend.AuthWebhookCacheDisabled)
+	assertDurationEqual(t, server.DefaultAuthWebhookCacheTTL, conf.Backend.AuthWebhookCacheTTL)
+
+	assert.Equal(t, server.DefaultHostname, conf.Backend.Hostname)
+	assert.Equal(t, server.DefaultGatewayAddr, conf.Backend.GatewayAddr)
+
+	assertDurationEqual(t, server.DefaultChannelSessionTTL, conf.Backend.ChannelSessionTTL)
+	assertDurationEqual(t, server.DefaultChannelSessionCleanupInterval, conf.Backend.ChannelSessionCleanupInterval)
+	assertDurationEqual(t, server.DefaultChannelSessionCountCacheTTL, conf.Backend.ChannelSessionCountCacheTTL)
+	assert.Equal(t, server.DefaultChannelSessionCountCacheSize, conf.Backend.ChannelSessionCountCacheSize)
+
+	assertDurationEqual(t, server.DefaultClusterRPCTimeout, conf.Backend.ClusterRPCTimeout)
+	assertDurationEqual(t, server.DefaultClusterClientTimeout, conf.Backend.ClusterClientTimeout)
+	assert.Equal(t, server.DefaultClusterClientPoolSize, conf.Backend.ClusterClientPoolSize)
+	assert.Equal(t, server.DefaultMaxConcurrentClusterRPCs, conf.Backend.MaxConcurrentClusterRPCs)
+
+	if conf.Mongo != nil {
+		assertDurationEqual(t, server.DefaultMongoConnectionTimeout, conf.Mongo.ConnectionTimeout)
+		assert.Equal(t, server.DefaultMongoConnectionURI, conf.Mongo.ConnectionURI)
+		assert.Equal(t, server.DefaultMongoYorkieDatabase, conf.Mongo.YorkieDatabase)
+		assertDurationEqual(t, server.DefaultMongoPingTimeout, conf.Mongo.PingTimeout)
+	}
+
+	if conf.Kafka != nil {
+		assert.Equal(t, server.DefaultKafkaUserEventsTopic, conf.Kafka.UserEventsTopic)
+		assert.Equal(t, server.DefaultKafkaChannelEventsTopic, conf.Kafka.ChannelEventsTopic)
+		assert.Equal(t, server.DefaultKafkaSessionEventsTopic, conf.Kafka.SessionEventsTopic)
+		assertDurationEqual(t, server.DefaultKafkaWriteTimeout, conf.Kafka.WriteTimeout)
+	}
+}
+
+// TestSampleConfigLeavesHeartbeatToTheClient checks the shipped sample config
+// serves the default heartbeat bounds and does not carry the deprecated
+// WatchHeartbeatInterval, so a deployment started from it heartbeats every
+// stream that asks and logs no deprecation warning.
+func TestSampleConfigLeavesHeartbeatToTheClient(t *testing.T) {
+	conf, err := server.NewConfigFromFile("config.sample.yml")
+	assert.NoError(t, err)
+
+	assert.Empty(t, conf.Backend.WatchHeartbeatInterval)
+	policy := conf.Backend.ParseWatchHeartbeatPolicy()
+	assert.Equal(t, server.DefaultWatchHeartbeatIntervalMin, policy.Min)
+	assert.Equal(t, server.DefaultWatchHeartbeatIntervalMax, policy.Max)
+}
+
+func TestNewConfigFromFile(t *testing.T) {
+	t.Run("fail read config file test", func(t *testing.T) {
+		conf := server.NewConfig()
+		assert.Equal(t, conf.RPCAddr(), "localhost:"+strconv.Itoa(server.DefaultRPCPort))
+		_, err := server.NewConfigFromFile("nowhere.yml")
+		assert.Error(t, err)
+		assert.Equal(t, conf.RPC.Port, server.DefaultRPCPort)
+		assert.Equal(t, conf.RPC.CertFile, "")
+		assert.Equal(t, conf.RPC.KeyFile, "")
+	})
+
+	t.Run("read empty config file test", func(t *testing.T) {
+		filePath := "config.empty.yml"
+		file, err := os.Create(filePath)
+		assert.NoError(t, err)
+		defer func() {
+			assert.NoError(t, file.Close())
+			assert.NoError(t, os.Remove(filePath))
+		}()
+		conf, err := server.NewConfigFromFile(filePath)
+		assert.NoError(t, err)
+		assertDefaultConfig(t, conf)
+	})
+
+	t.Run("read default config file test", func(t *testing.T) {
+		filePath := "config.sample.yml"
+		conf, err := server.NewConfigFromFile(filePath)
+		assert.NoError(t, err)
+		assertDefaultConfig(t, conf)
+	})
+
+	t.Run("read bare Backend section test", func(t *testing.T) {
+		file, err := os.CreateTemp(t.TempDir(), "config-*.yml")
+		assert.NoError(t, err)
+		_, err = file.WriteString("Backend:\n")
+		assert.NoError(t, err)
+		assert.NoError(t, file.Close())
+
+		// A bare section unmarshals to a nil Backend, which must still be
+		// filled with the default credentials and cache settings.
+		conf, err := server.NewConfigFromFile(file.Name())
+		assert.NoError(t, err)
+		// The signing key stays unset: server.New generates a random one,
+		// never a value published in the source.
+		assert.Empty(t, conf.Backend.SecretKey)
+		assert.Equal(t, server.DefaultAdminUser, conf.Backend.AdminUser)
+		assert.Equal(t, server.DefaultAdminPassword, conf.Backend.AdminPassword)
+		// The booleans are NOT re-seeded: UseDefaultProject gates keyless
+		// requests, so a bare section stays fail-closed rather than silently
+		// turning 401s into requests served against the default project.
+		assert.False(t, conf.Backend.UseDefaultProject)
+		assert.False(t, conf.Backend.AuthWebhookCacheDisabled)
+		assertDurationEqual(t, server.DefaultAuthWebhookCacheTTL, conf.Backend.AuthWebhookCacheTTL)
+		assert.NoError(t, conf.Validate())
+	})
+
+	t.Run("populated Backend section keeps omitted defaults test", func(t *testing.T) {
+		file, err := os.CreateTemp(t.TempDir(), "config-*.yml")
+		assert.NoError(t, err)
+		_, err = file.WriteString("Backend:\n  AdminUser: someone\n")
+		assert.NoError(t, err)
+		assert.NoError(t, file.Close())
+
+		// A section that spells out any key is a mapping, so YAML decodes into
+		// the struct newConfig pre-seeded and the keys it omits keep their
+		// defaults — including the auth-affecting UseDefaultProject.
+		conf, err := server.NewConfigFromFile(file.Name())
+		assert.NoError(t, err)
+		assert.Equal(t, "someone", conf.Backend.AdminUser)
+		assert.Equal(t, server.DefaultUseDefaultProject, conf.Backend.UseDefaultProject)
+		assert.True(t, conf.Backend.UseDefaultProject)
+		assert.NoError(t, conf.Validate())
+	})
+
+	t.Run("explicit UseDefaultProject false is preserved test", func(t *testing.T) {
+		file, err := os.CreateTemp(t.TempDir(), "config-*.yml")
+		assert.NoError(t, err)
+		_, err = file.WriteString("Backend:\n  UseDefaultProject: false\n")
+		assert.NoError(t, err)
+		assert.NoError(t, file.Close())
+
+		conf, err := server.NewConfigFromFile(file.Name())
+		assert.NoError(t, err)
+		assert.False(t, conf.Backend.UseDefaultProject)
+		assert.NoError(t, conf.Validate())
+	})
+
+	t.Run("read AuthWebhookCacheDisabled test", func(t *testing.T) {
+		file, err := os.CreateTemp(t.TempDir(), "config-*.yml")
+		assert.NoError(t, err)
+		_, err = file.WriteString("Backend:\n  AuthWebhookCacheDisabled: true\n")
+		assert.NoError(t, err)
+		assert.NoError(t, file.Close())
+
+		conf, err := server.NewConfigFromFile(file.Name())
+		assert.NoError(t, err)
+		assert.True(t, conf.Backend.AuthWebhookCacheDisabled)
+		// The cache switch must not drag the other booleans along with it.
+		assert.Equal(t, server.DefaultUseDefaultProject, conf.Backend.UseDefaultProject)
+		assert.NoError(t, conf.Validate())
+	})
+
+	t.Run("default Mongo project cache test", func(t *testing.T) {
+		file, err := os.CreateTemp(t.TempDir(), "config-*.yml")
+		assert.NoError(t, err)
+		_, err = file.WriteString("Mongo:\n  YorkieDatabase: yorkie-meta\n")
+		assert.NoError(t, err)
+		assert.NoError(t, file.Close())
+
+		// A Mongo section without the project cache keys must get the
+		// defaults, or the client fails to parse an empty TTL at startup.
+		conf, err := server.NewConfigFromFile(file.Name())
+		assert.NoError(t, err)
+		assert.Equal(t, server.DefaultProjectCacheSize, conf.Mongo.ProjectCacheSize)
+		assertDurationEqual(t, server.DefaultProjectCacheTTL, conf.Mongo.ProjectCacheTTL)
+		assert.NoError(t, conf.Validate())
+	})
+
+	t.Run("reject auth webhook cache TTL below cache.MinTTL test", func(t *testing.T) {
+		for _, ttl := range []string{"0s", "1ns"} {
+			conf, err := server.NewConfigFromFile("config.sample.yml")
+			assert.NoError(t, err)
+			conf.Backend.AuthWebhookCacheTTL = ttl
+			_, err = server.New(conf)
+			assert.ErrorContains(t, err, "--auth-webhook-cache-auth-ttl")
+		}
+	})
+
+	t.Run("explicit zero DeactivateConcurrency preserved (sequential opt-in)", func(t *testing.T) {
+		filePath := "config.zero-concurrency.yml"
+		file, err := os.Create(filePath)
+		assert.NoError(t, err)
+		_, err = file.WriteString("Housekeeping:\n  DeactivateConcurrency: 0\n")
+		assert.NoError(t, err)
+		defer func() {
+			assert.NoError(t, file.Close())
+			assert.NoError(t, os.Remove(filePath))
+		}()
+
+		conf, err := server.NewConfigFromFile(filePath)
+		assert.NoError(t, err)
+		// Explicit 0 must survive ensureDefaultValue so the documented
+		// "0 or 1 → sequential fallback" rollback works.
+		assert.Equal(t, 0, conf.Housekeeping.DeactivateConcurrency)
+	})
+
+	t.Run("negative DeactivateConcurrency survives ensure for Validate to reject", func(t *testing.T) {
+		filePath := "config.negative-concurrency.yml"
+		file, err := os.Create(filePath)
+		assert.NoError(t, err)
+		_, err = file.WriteString("Housekeeping:\n  DeactivateConcurrency: -5\n")
+		assert.NoError(t, err)
+		defer func() {
+			assert.NoError(t, file.Close())
+			assert.NoError(t, os.Remove(filePath))
+		}()
+
+		conf, err := server.NewConfigFromFile(filePath)
+		assert.NoError(t, err)
+		// ensureDefaultValue must not coerce a negative value away, otherwise
+		// the Validate() guard below would be dead code.
+		assert.Equal(t, -5, conf.Housekeeping.DeactivateConcurrency)
+		assert.Error(t, conf.Housekeeping.Validate())
+	})
+}

@@ -1,0 +1,140 @@
+/*
+ * Copyright 2024 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+syntax = "proto3";
+
+package yorkie.v1;
+
+import "yorkie/v1/resources.proto";
+
+option go_package = "github.com/yorkie-team/yorkie/api/yorkie/v1;v1";
+
+option java_multiple_files = true;
+option java_package = "dev.yorkie.api.v1";
+
+// ClusterService is a service that provides an API for Cluster.
+service ClusterService {
+  rpc DetachDocument (ClusterServiceDetachDocumentRequest) returns (ClusterServiceDetachDocumentResponse) {}
+  rpc CompactDocument (ClusterServiceCompactDocumentRequest) returns (ClusterServiceCompactDocumentResponse) {}
+  rpc PurgeDocument (ClusterServicePurgeDocumentRequest) returns (ClusterServicePurgeDocumentResponse) {}
+  rpc GetDocument (ClusterServiceGetDocumentRequest) returns (ClusterServiceGetDocumentResponse) {}
+  rpc ListChannels (ClusterServiceListChannelsRequest) returns (ClusterServiceListChannelsResponse) {}
+  rpc GetChannels (ClusterServiceGetChannelsRequest) returns (ClusterServiceGetChannelsResponse) {}
+  rpc Broadcast (ClusterServiceBroadcastRequest) returns (ClusterServiceBroadcastResponse) {}
+  rpc GetChannelCount (ClusterServiceGetChannelCountRequest) returns (ClusterServiceGetChannelCountResponse) {}
+  rpc InvalidateCache (InvalidateCacheRequest) returns (InvalidateCacheResponse) {}
+  rpc RevalidateAccess (ClusterServiceRevalidateAccessRequest) returns (ClusterServiceRevalidateAccessResponse) {}
+}
+
+message ClusterServiceDetachDocumentRequest {
+  Project project = 1;
+  string client_id = 2;
+  string document_id = 3;
+  string document_key = 4;
+}
+
+message ClusterServiceDetachDocumentResponse {}
+
+message ClusterServiceCompactDocumentRequest {
+  string project_id = 1;
+  string document_id = 2;
+  string document_key = 3;
+  bool force = 4;
+}
+
+message ClusterServiceCompactDocumentResponse {
+  bool compacted = 1;
+}
+
+message ClusterServicePurgeDocumentRequest {
+  string project_id = 1;
+  string document_id = 2;
+  string document_key = 3;
+}
+
+message ClusterServicePurgeDocumentResponse {}
+
+message ClusterServiceGetDocumentRequest {
+  Project project = 1;
+  string document_key = 2;
+  bool include_root = 3;
+  bool include_presences = 4;
+}
+
+message ClusterServiceGetDocumentResponse {
+  DocumentSummary document = 1;
+}
+
+message ClusterServiceListChannelsRequest {
+  string project_id = 1;
+  string query = 2;
+  int32 limit = 3;
+}
+
+message ClusterServiceListChannelsResponse {
+  repeated ChannelSummary channels = 1;
+}
+
+message ClusterServiceGetChannelsRequest {
+  string project_id = 1;
+  repeated string channel_keys = 2;
+  bool include_sub_path = 3;
+}
+
+message ClusterServiceGetChannelsResponse {
+  repeated ChannelSummary channels = 1;
+}
+
+message ClusterServiceBroadcastRequest {
+  string project_id = 1;
+  string channel_key = 2;
+  string topic = 3;
+  bytes payload = 4;
+}
+
+message ClusterServiceBroadcastResponse {}
+
+message ClusterServiceGetChannelCountRequest {
+  string project_id = 1;
+}
+
+message ClusterServiceGetChannelCountResponse {
+  int32 channel_count = 1;
+}
+
+enum CacheType {
+  CACHE_TYPE_UNSPECIFIED = 0;
+  CACHE_TYPE_PROJECT = 1;
+  CACHE_TYPE_CLIENT = 2;
+  CACHE_TYPE_DOCUMENT = 3;
+}
+
+message InvalidateCacheRequest {
+  CacheType cache_type = 1;
+  string key = 2;
+}
+
+message InvalidateCacheResponse {
+  bool success = 1;
+}
+
+message ClusterServiceRevalidateAccessRequest {
+  string project_id = 1;
+  repeated string keys = 2;
+}
+
+message ClusterServiceRevalidateAccessResponse {
+  int32 closed_streams = 1;
+}

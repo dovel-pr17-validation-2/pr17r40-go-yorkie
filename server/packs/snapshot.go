@@ -1,0 +1,349 @@
+/*
+ * Copyright 2021 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package packs
+
+import (
+	"context"
+	"fmt"
+	gotime "time"
+
+	"go.uber.org/zap"
+
+	"github.com/yorkie-team/yorkie/api/types"
+	"github.com/yorkie-team/yorkie/pkg/document"
+	"github.com/yorkie-team/yorkie/pkg/document/change"
+	"github.com/yorkie-team/yorkie/pkg/document/time"
+	"github.com/yorkie-team/yorkie/pkg/document/yson"
+	"github.com/yorkie-team/yorkie/pkg/key"
+	"github.com/yorkie-team/yorkie/server/backend"
+	"github.com/yorkie-team/yorkie/server/backend/database"
+	"github.com/yorkie-team/yorkie/server/backend/sync"
+	"github.com/yorkie-team/yorkie/server/logging"
+)
+
+var (
+	// ErrUnexpectedRevisionType is returned when the revision type is unexpected.
+	ErrUnexpectedRevisionType = fmt.Errorf("unexpected revision type")
+)
+
+// SnapshotKey creates a new sync.Key of Snapshot for the given document.
+func SnapshotKey(projectID types.ID, docKey key.Key) sync.Key {
+	return sync.NewKey(fmt.Sprintf("snapshot-%s-%s", projectID, docKey))
+}
+
+// BuildDocForCheckpoint returns a new document for the given checkpoint.
+func BuildDocForCheckpoint(
+	ctx context.Context,
+	be *backend.Backend,
+	docInfo *database.DocInfo,
+	cp change.Checkpoint,
+	actorID time.ActorID,
+) (*document.Document, error) {
+	internalDoc, err := BuildInternalDocForServerSeq(ctx, be, docInfo, cp.ServerSeq)
+	if err != nil {
+		return nil, err
+	}
+
+	internalDoc.SetActor(actorID)
+	internalDoc.SyncCheckpoint(cp.ServerSeq, cp.ClientSeq)
+	return internalDoc.ToDocument(), nil
+}
+
+// BuildInternalDocForServerSeq returns a new document for the given serverSeq.
+func BuildInternalDocForServerSeq(
+	ctx context.Context,
+	be *backend.Backend,
+	docInfo *database.DocInfo,
+	serverSeq int64,
+) (*document.InternalDocument, error) {
+	docKey := docInfo.RefKey()
+	var doc *document.InternalDocument
+	var err error
+	if cached, ok := be.Cache.Snapshot.Get(docKey); ok {
+		doc, err = cached.DeepCopy()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// NOTE(hackerwins): If the document is already in the cache, we can skip
+	// the database query and use the cached document. If the document's server
+	// sequence in the cache is greater than the given server sequence, we can't
+	// build the document from the document. In this case, we need to
+	// query the database to get the closest snapshot information.
+	if doc == nil || serverSeq < doc.Checkpoint().ServerSeq {
+		snapshotInfo, err := be.DB.FindClosestSnapshotInfo(
+			ctx,
+			docKey,
+			serverSeq,
+			true,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		doc, err = document.NewInternalDocumentFromSnapshot(
+			docInfo.Key,
+			snapshotInfo.ServerSeq,
+			snapshotInfo.Lamport,
+			snapshotInfo.VersionVector,
+			snapshotInfo.Snapshot,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	changes, err := be.DB.FindChangesBetweenServerSeqs(
+		ctx,
+		docKey,
+		doc.Checkpoint().ServerSeq+1,
+		serverSeq,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := doc.ApplyChangePack(change.NewPack(
+		docInfo.Key,
+		change.InitialCheckpoint.NextServerSeq(serverSeq),
+		changes,
+		nil,
+		nil,
+	), be.Config.SnapshotDisableGC); err != nil {
+		return nil, err
+	}
+	if !be.Config.SnapshotDisableGC {
+		vector, err := be.DB.GetMinVersionVector(
+			ctx,
+			docKey,
+			doc.VersionVector(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := doc.GarbageCollect(vector); err != nil {
+			return nil, err
+		}
+	}
+
+	// NOTE(hackerwins): Store the last accessed document in the cache.
+	be.Cache.Snapshot.Add(docKey, doc)
+
+	if logging.Enabled(zap.DebugLevel) {
+		logging.From(ctx).Debugf(
+			"after apply %d changes: elements: %d removeds: %d, %s",
+			len(changes),
+			doc.Root().ElementMapLen(),
+			doc.Root().GarbageElementLen(),
+			doc.RootObject().Marshal(),
+		)
+	}
+
+	clone, err := doc.DeepCopy()
+	if err != nil {
+		return nil, err
+	}
+
+	return clone, nil
+}
+
+// storeSnapshot stores the snapshot for the given document if needed.
+func storeSnapshot(
+	ctx context.Context,
+	be *backend.Backend,
+	snapshotInterval int64,
+	docInfo *database.DocInfo,
+) error {
+	// NOTE(hackerwins): If the snapshot is already being created by another routine,
+	// it is not necessary to recreate it, so we can skip it.
+	locker, ok := be.Lockers.LockerWithTryLock(SnapshotKey(docInfo.ProjectID, docInfo.Key))
+	if !ok {
+		return nil
+	}
+	defer locker.Unlock()
+
+	start := gotime.Now()
+
+	// 01. get the closest snapshot's metadata of this docInfo
+	docRefKey := docInfo.RefKey()
+	info, err := be.DB.FindClosestSnapshotInfo(
+		ctx,
+		docRefKey,
+		docInfo.ServerSeq,
+		false,
+	)
+	if err != nil {
+		return err
+	}
+	if info.ServerSeq == docInfo.ServerSeq {
+		return nil
+	}
+	if docInfo.ServerSeq-info.ServerSeq < snapshotInterval {
+		return nil
+	}
+
+	// 02. retrieve the changes between last snapshot and current docInfo
+	changes, err := be.DB.FindChangesBetweenServerSeqs(
+		ctx,
+		docRefKey,
+		info.ServerSeq+1,
+		docInfo.ServerSeq,
+	)
+	if err != nil {
+		return err
+	}
+
+	// 03. Fetch the snapshot info including its snapshot.
+	if info.ID != "" {
+		info, err = be.DB.FindSnapshotInfo(ctx, info.DocRefKey(), info.ServerSeq)
+		if err != nil {
+			return err
+		}
+	}
+
+	doc, err := document.NewInternalDocumentFromSnapshot(
+		docInfo.Key,
+		info.ServerSeq,
+		info.Lamport,
+		info.VersionVector,
+		info.Snapshot,
+	)
+	if err != nil {
+		return err
+	}
+
+	pack := change.NewPack(
+		docInfo.Key,
+		change.InitialCheckpoint.NextServerSeq(docInfo.ServerSeq),
+		changes,
+		nil,
+		nil,
+	)
+
+	if err := doc.ApplyChangePack(pack, be.Config.SnapshotDisableGC); err != nil {
+		return err
+	}
+
+	// 04b. Drop presence before persisting when the document opted out.
+	// Defensive against snapshot rows written before the flag existed: the
+	// ApplyChangePack above can rehydrate cached presence onto the in-memory
+	// doc, so reset right before CreateSnapshotInfo to keep the new
+	// snapshots row clean.
+	if docInfo.DisablePresence {
+		doc.ResetPresences()
+	}
+
+	// 05. save the snapshot of the docInfo
+	if err := be.DB.CreateSnapshotInfo(
+		ctx,
+		docRefKey,
+		doc,
+	); err != nil {
+		logging.From(ctx).Errorf(
+			"SNAP: failed to store snapshot '%s', serverSeq: %d: %v",
+			docInfo.Key,
+			doc.Checkpoint().ServerSeq,
+			err,
+		)
+		return err
+	}
+
+	logging.From(ctx).Infof(
+		"SNAP: '%s', serverSeq: %d",
+		docInfo.Key,
+		doc.Checkpoint().ServerSeq,
+	)
+
+	// 06. Store a revision of the snapshot, unless nothing but presence moved.
+	// Presence-only changes take a server_seq without carrying operations, so
+	// they can drive the snapshot interval on their own. When no operation ran
+	// since the previous snapshot, this snapshot has the same root as that one
+	// and its revision would duplicate the previous revision, so skip it.
+	if hasOperations(changes) {
+		if err := storeRevision(ctx, be, docInfo, doc); err != nil {
+			return err
+		}
+	}
+
+	be.Metrics.ObservePushPullSnapshotDurationSeconds(gotime.Since(start).Seconds())
+
+	return nil
+}
+
+// hasOperations returns true if any of the given changes carries an
+// operation. A change without operations only moves presence, which the
+// revision does not record.
+func hasOperations(changes []*change.Change) bool {
+	for _, cn := range changes {
+		if cn.HasOperations() {
+			return true
+		}
+	}
+
+	return false
+}
+
+// storeRevision stores the revision for the given document if needed.
+func storeRevision(
+	ctx context.Context,
+	be *backend.Backend,
+	docInfo *database.DocInfo,
+	doc *document.InternalDocument,
+) error {
+	docRefKey := docInfo.RefKey()
+	projectInfo, err := be.DB.FindProjectInfoByID(ctx, docInfo.ProjectID)
+	if err != nil {
+		return fmt.Errorf("store revision: %w", err)
+	}
+
+	if !projectInfo.AutoRevisionEnabled {
+		return nil
+	}
+
+	// Generate snapshot from the root object (YSON format)
+	ysonRoot, err := yson.FromCRDT(doc.RootObject())
+	if err != nil {
+		return fmt.Errorf("store revision of %s: %w", docRefKey, err)
+	}
+	ysonObj, ok := ysonRoot.(yson.Object)
+	if !ok {
+		return fmt.Errorf("store revision of %s: %w", docRefKey, ErrUnexpectedRevisionType)
+	}
+	snapshot, err := ysonObj.Marshal()
+	if err != nil {
+		return fmt.Errorf("store revision of %s: %w", docRefKey, err)
+	}
+
+	// Create label and description for the revision.
+	label := fmt.Sprintf("snapshot-%d", doc.Checkpoint().ServerSeq)
+	description := fmt.Sprintf("Auto created revision of snapshot #%d", doc.Checkpoint().ServerSeq)
+
+	if _, err := be.DB.CreateRevisionInfo(
+		ctx,
+		docRefKey,
+		label,
+		description,
+		[]byte(snapshot),
+	); err != nil {
+		return fmt.Errorf("store revision of %s: %w", docRefKey, err)
+	}
+
+	logging.From(ctx).Infof("REV : '%s', label: %s", docInfo.Key, label)
+
+	return nil
+}

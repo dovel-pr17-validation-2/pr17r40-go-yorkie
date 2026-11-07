@@ -1,0 +1,278 @@
+/*
+ * Copyright 2022 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package types
+
+import (
+	"fmt"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/yorkie-team/yorkie/internal/validation"
+	"github.com/yorkie-team/yorkie/pkg/errors"
+)
+
+// ErrEmptyProjectFields is returned when all the fields are empty.
+var ErrEmptyProjectFields = errors.InvalidArgument("updatable project fields are empty").WithCode("ErrEmptyProjectFields")
+
+// UpdatableProjectFields is a set of fields that use to update a project.
+type UpdatableProjectFields struct {
+	// Name is the name of this project.
+	Name *string `bson:"name,omitempty" validate:"omitempty,min=2,max=30,slug,reserved_project_name"`
+
+	// AuthWebhookURL is the url of the authorization webhook.
+	AuthWebhookURL *string `bson:"auth_webhook_url,omitempty" validate:"omitempty,url|emptystring"`
+
+	// AuthWebhookMethods is the methods that run the authorization webhook.
+	AuthWebhookMethods *[]string `bson:"auth_webhook_methods,omitempty" validate:"omitempty,invalid_webhook_method"`
+
+	// AuthWebhookMaxRetries is the max count that retries the authorization webhook.
+	AuthWebhookMaxRetries *uint64 `bson:"auth_webhook_max_retries,omitempty" validate:"omitempty,min=0"`
+
+	// AuthWebhookMinWaitInterval is the min interval that waits before retrying the authorization webhook.
+	AuthWebhookMinWaitInterval *string `bson:"auth_webhook_min_wait_interval,omitempty" validate:"omitempty,min=2,duration"`
+
+	// AuthWebhookMaxWaitInterval is the max interval that waits before retrying the authorization webhook.
+	AuthWebhookMaxWaitInterval *string `bson:"auth_webhook_max_wait_interval,omitempty" validate:"omitempty,min=2,duration"`
+
+	// AuthWebhookRequestTimeout is the max waiting time per auth webhook request.
+	AuthWebhookRequestTimeout *string `bson:"auth_webhook_request_timeout,omitempty" validate:"omitempty,min=2,duration"`
+
+	// EventWebhookURL is the URL of the event webhook.
+	EventWebhookURL *string `bson:"event_webhook_url,omitempty" validate:"omitempty,url|emptystring"`
+
+	// EventWebhookEvents is the events that trigger the webhook.
+	EventWebhookEvents *[]string `bson:"event_webhook_events,omitempty" validate:"omitempty,invalid_webhook_event"`
+
+	// EventWebhookMaxRetries is the max count that retries the event webhook.
+	EventWebhookMaxRetries *uint64 `bson:"event_webhook_max_retries,omitempty" validate:"omitempty,min=0"`
+
+	// EventWebhookMinWaitInterval is the min interval that waits before retrying the event webhook.
+	EventWebhookMinWaitInterval *string `bson:"event_webhook_min_wait_interval,omitempty" validate:"omitempty,min=2,duration"`
+
+	// EventWebhookMaxWaitInterval is the max interval that waits before retrying the event webhook.
+	EventWebhookMaxWaitInterval *string `bson:"event_webhook_max_wait_interval,omitempty" validate:"omitempty,min=2,duration"`
+
+	// EventWebhookRequestTimeout is the max waiting time per event webhook request.
+	EventWebhookRequestTimeout *string `bson:"event_webhook_request_timeout,omitempty" validate:"omitempty,min=2,duration"`
+
+	// ClientDeactivateThreshold is the time after which clients in specific project are considered deactivate.
+	ClientDeactivateThreshold *string `bson:"client_deactivate_threshold,omitempty" validate:"omitempty,min=2,duration"`
+
+	// ChannelSessionTTL controls per-project presence-channel
+	// session retention. Must parse as a Go duration and fall
+	// within [1s, 5m].
+	ChannelSessionTTL *string `bson:"channel_session_ttl,omitempty" validate:"omitempty,channel_session_ttl"`
+
+	// SnapshotThreshold is the threshold that determines if changes should be
+	// sent with snapshot when the number of changes is greater than this value.
+	SnapshotThreshold *int64 `bson:"snapshot_threshold,omitempty" validate:"omitempty,min=0"`
+
+	// SnapshotInterval is the interval of changes to create a snapshot.
+	SnapshotInterval *int64 `bson:"snapshot_interval,omitempty" validate:"omitempty,min=0"`
+
+	// MaxSubscribersPerDocument is the maximum number of subscribers per document.
+	// If it is 0, there is no limit.
+	MaxSubscribersPerDocument *int `bson:"max_subscribers_per_document,omitempty" validate:"omitempty,min=0"`
+
+	// MaxAttachmentsPerDocument is the maximum number of attachments per document.
+	// If it is 0, there is no limit.
+	MaxAttachmentsPerDocument *int `bson:"max_attachments_per_document,omitempty" validate:"omitempty,min=0"`
+
+	// MaxSizePerDocument is the maximum size of a document in bytes.
+	MaxSizePerDocument *int `bson:"max_size_per_document,omitempty" validate:"omitempty,min=0"`
+
+	// RemoveOnDetach is the flag to remove the document on detach.
+	RemoveOnDetach *bool `bson:"remove_on_detach,omitempty" validate:"omitempty,boolean"`
+
+	// AutoRevisionEnabled is the flag to automatically create revisions during snapshot.
+	AutoRevisionEnabled *bool `bson:"auto_revision_enabled,omitempty" validate:"omitempty,boolean"`
+
+	// AllowedOrigins is the list of origins that are allowed to access the project.
+	AllowedOrigins *[]string `bson:"allowed_origins,omitempty" validate:"omitempty,dive,valid_origin"`
+}
+
+// isValidOrigin reports whether v is an acceptable AllowedOrigins entry:
+// the universal "*" or an origin URL whose wildcards (if any) appear only
+// inside host labels.
+func isValidOrigin(v string) bool {
+	if v == "*" {
+		return true
+	}
+	if err := validation.Validate(v, []any{"url"}); err != nil {
+		return false
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return false
+	}
+	for label := range strings.SplitSeq(u.Hostname(), ".") {
+		if label == "" {
+			return false
+		}
+	}
+	if !strings.Contains(v, "*") {
+		return true
+	}
+	if strings.ContainsAny(u.Scheme, "*") ||
+		strings.ContainsAny(u.Path, "*") ||
+		strings.ContainsAny(u.RawQuery, "*") ||
+		strings.ContainsAny(u.Fragment, "*") ||
+		strings.ContainsAny(u.Port(), "*") {
+		return false
+	}
+	if u.User != nil && strings.ContainsAny(u.User.String(), "*") {
+		return false
+	}
+	return true
+}
+
+// Validate validates the UpdatableProjectFields.
+func (i *UpdatableProjectFields) Validate() error {
+	if i.Name == nil &&
+		i.AuthWebhookURL == nil &&
+		i.AuthWebhookMethods == nil &&
+		i.AuthWebhookMaxRetries == nil &&
+		i.AuthWebhookMinWaitInterval == nil &&
+		i.AuthWebhookMaxWaitInterval == nil &&
+		i.AuthWebhookRequestTimeout == nil &&
+		i.EventWebhookURL == nil &&
+		i.EventWebhookEvents == nil &&
+		i.EventWebhookMaxRetries == nil &&
+		i.EventWebhookMinWaitInterval == nil &&
+		i.EventWebhookMaxWaitInterval == nil &&
+		i.EventWebhookRequestTimeout == nil &&
+		i.ClientDeactivateThreshold == nil &&
+		i.SnapshotThreshold == nil &&
+		i.SnapshotInterval == nil &&
+		i.MaxSubscribersPerDocument == nil &&
+		i.MaxAttachmentsPerDocument == nil &&
+		i.MaxSizePerDocument == nil &&
+		i.RemoveOnDetach == nil &&
+		i.AutoRevisionEnabled == nil &&
+		i.AllowedOrigins == nil &&
+		i.ChannelSessionTTL == nil {
+		return ErrEmptyProjectFields
+	}
+
+	return validation.ValidateStruct(i)
+}
+
+func init() {
+	if err := validation.RegisterValidation(
+		"invalid_webhook_method",
+		func(level validation.FieldLevel) bool {
+			methods := level.Field().Interface().([]string)
+			for _, method := range methods {
+				if !IsAuthMethod(method) {
+					return false
+				}
+			}
+			return true
+		},
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+
+	if err := validation.RegisterTranslation("invalid_webhook_method", "given {0} is invalid method"); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+
+	if err := validation.RegisterValidation(
+		"invalid_webhook_event",
+		func(level validation.FieldLevel) bool {
+			eventTypes := level.Field().Interface().([]string)
+			for _, eventType := range eventTypes {
+				if !IsValidEventType(eventType) {
+					return false
+				}
+			}
+			return true
+		},
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+
+	if err := validation.RegisterTranslation("invalid_webhook_event", "given {0} is invalid event type"); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+
+	if err := validation.RegisterValidation(
+		"duration",
+		func(level validation.FieldLevel) bool {
+			duration := level.Field().String()
+			if _, err := time.ParseDuration(duration); err != nil {
+				return false
+			}
+			return true
+		},
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+
+	if err := validation.RegisterTranslation("duration", "given {0} must be a valid duration"); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+
+	if err := validation.RegisterValidation(
+		"valid_origin",
+		func(level validation.FieldLevel) bool {
+			return isValidOrigin(level.Field().String())
+		},
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+
+	if err := validation.RegisterTranslation(
+		"valid_origin",
+		"given {0} must be '*' or an origin URL; wildcards are only allowed inside host labels",
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+
+	if err := validation.RegisterValidation(
+		"channel_session_ttl",
+		func(level validation.FieldLevel) bool {
+			d, err := time.ParseDuration(level.Field().String())
+			if err != nil {
+				return false
+			}
+			return d >= time.Second && d <= 5*time.Minute
+		},
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+
+	if err := validation.RegisterTranslation(
+		"channel_session_ttl",
+		"given {0} must be a duration between 1s and 5m",
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "updatable project fields: ", err)
+		os.Exit(1)
+	}
+}

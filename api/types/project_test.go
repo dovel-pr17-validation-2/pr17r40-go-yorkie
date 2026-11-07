@@ -1,0 +1,168 @@
+/*
+ * Copyright 2022 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package types_test
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/yorkie-team/yorkie/api/types"
+)
+
+func TestChannelSessionTTLAsTimeDuration(t *testing.T) {
+	p := &types.Project{ChannelSessionTTL: "30s"}
+	d, err := p.ChannelSessionTTLAsTimeDuration()
+	assert.NoError(t, err)
+	assert.Equal(t, 30*time.Second, d)
+
+	p.ChannelSessionTTL = "garbage"
+	_, err = p.ChannelSessionTTLAsTimeDuration()
+	assert.ErrorIs(t, err, types.ErrInvalidTimeDurationString)
+}
+
+func TestProjectInfo(t *testing.T) {
+	t.Run("require auth test", func(t *testing.T) {
+		// 1. Specify which methods to allow
+		validWebhookURL := "ValidWebhookURL"
+		info := &types.Project{
+			AuthWebhookURL:     validWebhookURL,
+			AuthWebhookMethods: []string{string(types.ActivateClient)},
+		}
+		assert.True(t, info.RequireAuth(types.ActivateClient))
+		assert.False(t, info.RequireAuth(types.DetachDocument))
+
+		// 2. No method specified
+		info2 := &types.Project{
+			AuthWebhookURL:     validWebhookURL,
+			AuthWebhookMethods: []string{},
+		}
+		assert.False(t, info2.RequireAuth(types.ActivateClient))
+		assert.False(t, info2.RequireAuth(types.DetachDocument))
+
+		// 3. Empty webhook URL
+		info3 := &types.Project{
+			AuthWebhookURL: "",
+		}
+		assert.False(t, info3.RequireAuth(types.ActivateClient))
+	})
+
+	t.Run("require event webhook test", func(t *testing.T) {
+		// 1. Specify which event types to allow
+		validWebhookURL := "ValidWebhookURL"
+		info := &types.Project{
+			EventWebhookURL:    validWebhookURL,
+			EventWebhookEvents: []string{string(types.DocRootChanged)},
+		}
+		assert.True(t, info.RequireEventWebhook(types.DocRootChanged))
+
+		// 2. No event types specified
+		info2 := &types.Project{
+			EventWebhookURL:    validWebhookURL,
+			EventWebhookEvents: []string{},
+		}
+		assert.False(t, info2.RequireEventWebhook(types.DocRootChanged))
+
+		// 3. Empty webhook URL
+		info3 := &types.Project{
+			EventWebhookURL: "",
+		}
+		assert.False(t, info3.RequireEventWebhook(types.DocRootChanged))
+	})
+
+	t.Run("HasSubscriberLimit test", func(t *testing.T) {
+		info := &types.Project{
+			MaxSubscribersPerDocument: 1,
+		}
+		assert.True(t, info.HasSubscriberLimit())
+
+		info2 := &types.Project{
+			MaxSubscribersPerDocument: 0,
+		}
+		assert.False(t, info2.HasSubscriberLimit())
+	})
+
+	t.Run("HasAttachmentLimit test", func(t *testing.T) {
+		info := &types.Project{
+			MaxAttachmentsPerDocument: 1,
+		}
+		assert.True(t, info.HasAttachmentLimit())
+
+		info2 := &types.Project{
+			MaxAttachmentsPerDocument: 0,
+		}
+		assert.False(t, info2.HasAttachmentLimit())
+	})
+
+	t.Run("IsAttachmentLimitExceeded test", func(t *testing.T) {
+		info := &types.Project{
+			MaxAttachmentsPerDocument: 1,
+		}
+		assert.NoError(t, info.IsAttachmentLimitExceeded(0))
+
+		info2 := &types.Project{
+			MaxAttachmentsPerDocument: 1,
+		}
+		assert.Error(t, info2.IsAttachmentLimitExceeded(1))
+	})
+
+	t.Run("parse test", func(t *testing.T) {
+		validInfo := &types.Project{
+			ClientDeactivateThreshold:   "20h",
+			AuthWebhookMinWaitInterval:  "10ms",
+			AuthWebhookMaxWaitInterval:  "5s",
+			AuthWebhookRequestTimeout:   "3s",
+			EventWebhookMinWaitInterval: "40ms",
+			EventWebhookMaxWaitInterval: "3s",
+			EventWebhookRequestTimeout:  "2s",
+		}
+		clientDeactivateThreshold, err := validInfo.ClientDeactivateThresholdAsTimeDuration()
+		assert.NoError(t, err)
+		assert.Equal(t, clientDeactivateThreshold.String(), "20h0m0s")
+
+		authWebhookOptions, err := validInfo.GetAuthWebhookOptions()
+		assert.NoError(t, err)
+		assert.Equal(t, authWebhookOptions.MinWaitInterval.String(), "10ms")
+		assert.Equal(t, authWebhookOptions.MaxWaitInterval.String(), "5s")
+		assert.Equal(t, authWebhookOptions.RequestTimeout.String(), "3s")
+
+		eventWebhookOptions, err := validInfo.GetEventWebhookOptions()
+		assert.NoError(t, err)
+		assert.Equal(t, eventWebhookOptions.MinWaitInterval.String(), "40ms")
+		assert.Equal(t, eventWebhookOptions.MaxWaitInterval.String(), "3s")
+		assert.Equal(t, eventWebhookOptions.RequestTimeout.String(), "2s")
+
+		invalidInfo := &types.Project{
+			ClientDeactivateThreshold:   "1 hour",
+			AuthWebhookMinWaitInterval:  "s",
+			AuthWebhookMaxWaitInterval:  "3",
+			AuthWebhookRequestTimeout:   "3 sec",
+			EventWebhookMinWaitInterval: "1",
+			EventWebhookMaxWaitInterval: "3 seconds",
+			EventWebhookRequestTimeout:  "2seconds",
+		}
+		_, err = invalidInfo.ClientDeactivateThresholdAsTimeDuration()
+		assert.Error(t, err)
+
+		_, err = invalidInfo.GetAuthWebhookOptions()
+		assert.Error(t, err)
+
+		_, err = invalidInfo.GetEventWebhookOptions()
+		assert.Error(t, err)
+	})
+}

@@ -1,0 +1,48 @@
+/*
+ * Copyright 2023 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package types
+
+// AuthScheme represents the scheme of the Authorization header.
+const (
+	AuthSchemeBearer = "Bearer"
+	AuthSchemeAPIKey = "API-Key"
+)
+
+// AuthorizationKey is the key of the authorization header.
+const AuthorizationKey = "authorization"
+
+// SessionKey is the key of the session key from the cookie.
+const SessionKey = "yorkie_session"
+
+// UserAgentKey is the key of the user agent header.
+const UserAgentKey = "x-yorkie-user-agent"
+
+// APIKeyKey is the key of the api key header.
+const APIKeyKey = "x-api-key"
+
+// ProjectNameKey is the key of the header that names the project a
+// session-authenticated request acts on. A project-scoped AdminService method
+// reached with a Bearer token reads its project from this header instead of
+// from a secret key.
+const ProjectNameKey = "x-yorkie-project"
+
+// ShardKey is the key of the shard header.
+const ShardKey = "x-shard-key"
+
+// GoSDKType is the type part of Go SDK in value of UserAgent.
+const GoSDKType = "yorkie-go-sdk"

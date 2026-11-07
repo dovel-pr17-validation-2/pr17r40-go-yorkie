@@ -1,0 +1,674 @@
+/*
+ * Copyright 2025 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package warehouse
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+
+	"github.com/yorkie-team/yorkie/api/types"
+	"github.com/yorkie-team/yorkie/api/types/events"
+	"github.com/yorkie-team/yorkie/server/logging"
+)
+
+// StarRocks is a warehouse that stores data in StarRocks.
+//
+// NOTE(hackerwins): The queries below filter on DATE(timestamp) instead of the
+// raw timestamp. StarRocks rewrites an APPROX_COUNT_DISTINCT query onto a
+// synchronous materialized view grouped by DATE(timestamp) only when the query
+// uses the same expression in its predicate. With a raw timestamp predicate the
+// query silently falls back to a full scan of the base event table.
+//
+// With SummaryEnabled the reads are a dual read, split against the day range
+// the summary actually covers rather than at today; see coverage.go and
+// query.go.
+type StarRocks struct {
+	conf   *Config
+	driver *sql.DB
+
+	// coverage caches which days each summary table holds, the range the dual
+	// read splits the window against. See coverage.go.
+	coverage coverageCache
+}
+
+// dial connects to the StarRocks.
+func (r *StarRocks) dial(dsn string) error {
+	driver, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return fmt.Errorf("open mysql driver: %w", err)
+	}
+
+	if err := driver.Ping(); err != nil {
+		return fmt.Errorf("ping starrocks: %w", err)
+	}
+
+	r.driver = driver
+	return nil
+}
+
+// summaryEnabled reports whether the dual-read summary path is turned on.
+func (r *StarRocks) summaryEnabled() bool {
+	return r.conf != nil && r.conf.SummaryEnabled
+}
+
+// todayUTC returns the start of the current day in UTC. It is the ceiling the
+// end of the summary's coverage is clamped to, not that end itself; see
+// coverage.go.
+func todayUTC() time.Time {
+	return time.Now().UTC().Truncate(24 * time.Hour)
+}
+
+// GetActiveUsers returns the number of active users in the given time range.
+func (r *StarRocks) GetActiveUsers(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) ([]types.MetricPoint, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return nil, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT 
+	    DATE(timestamp) AS event_date, 
+	    APPROX_COUNT_DISTINCT(user_id) AS active_users
+	FROM 
+	    user_events
+	WHERE
+		project_id = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s'
+	GROUP BY 
+	    event_date
+	ORDER BY 
+	    event_date ASC;
+	`, id.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descUser)
+		if err != nil {
+			return nil, fmt.Errorf("get active users: %w", err)
+		}
+		query = descUser.seriesQuery(id, from, to, cov)
+	}
+
+	metrics, err := r.queryMetrics(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get active users: %w", err)
+	}
+	return metrics, nil
+}
+
+// GetActiveUsersCount returns the total number of active users in the given time range.
+func (r *StarRocks) GetActiveUsersCount(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) (int, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return 0, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT 
+	    APPROX_COUNT_DISTINCT(user_id) AS active_users
+	FROM 
+	    user_events
+	WHERE
+		project_id = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s';
+	`, id.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descUser)
+		if err != nil {
+			return 0, fmt.Errorf("get active users count: %w", err)
+		}
+		query = descUser.totalQuery(id, from, to, cov)
+	}
+
+	count, err := r.queryCount(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("get active users count: %w", err)
+	}
+	return count, nil
+}
+
+// GetActiveDocuments returns the number of active documents in the given time range.
+func (r *StarRocks) GetActiveDocuments(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) ([]types.MetricPoint, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return nil, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT 
+	    DATE(timestamp) AS event_date, 
+	    APPROX_COUNT_DISTINCT(document_key) AS active_documents
+	FROM 
+	    document_events
+	WHERE
+		project_id = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s'
+	GROUP BY 
+	    event_date
+	ORDER BY 
+	    event_date ASC;
+	`, id.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descDocument)
+		if err != nil {
+			return nil, fmt.Errorf("get active documents: %w", err)
+		}
+		query = descDocument.seriesQuery(id, from, to, cov)
+	}
+
+	metrics, err := r.queryMetrics(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get active documents: %w", err)
+	}
+	return metrics, nil
+}
+
+// GetActiveDocumentsCount returns the total number of active documents in the given time range.
+func (r *StarRocks) GetActiveDocumentsCount(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) (int, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return 0, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT 
+		APPROX_COUNT_DISTINCT(document_key) AS active_documents
+	FROM 
+		document_events
+	WHERE
+		project_id = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s';
+	`, id.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descDocument)
+		if err != nil {
+			return 0, fmt.Errorf("get active documents count: %w", err)
+		}
+		query = descDocument.totalQuery(id, from, to, cov)
+	}
+
+	count, err := r.queryCount(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("get active documents count: %w", err)
+	}
+	return count, nil
+}
+
+// GetActiveClients returns the number of active clients in the given time range.
+func (r *StarRocks) GetActiveClients(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) ([]types.MetricPoint, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return nil, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT
+	    DATE(timestamp) AS event_date,
+	    APPROX_COUNT_DISTINCT(client_id) AS active_clients
+	FROM
+	    client_events
+	WHERE
+		project_id = '%s'
+		AND event_type = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s'
+	GROUP BY
+	    event_date
+	ORDER BY
+	    event_date ASC;
+	`, id.String(), events.ClientActivatedEvent, from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descClient)
+		if err != nil {
+			return nil, fmt.Errorf("get active clients: %w", err)
+		}
+		query = descClient.seriesQuery(id, from, to, cov)
+	}
+
+	metrics, err := r.queryMetrics(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get active clients: %w", err)
+	}
+	return metrics, nil
+}
+
+// GetActiveClientsCount returns the total number of active clients in the given time range.
+func (r *StarRocks) GetActiveClientsCount(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) (int, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return 0, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT
+		APPROX_COUNT_DISTINCT(client_id) AS active_clients
+	FROM
+		client_events
+	WHERE
+		project_id = '%s'
+		AND event_type = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s';
+	`, id.String(), events.ClientActivatedEvent, from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descClient)
+		if err != nil {
+			return 0, fmt.Errorf("get active clients count: %w", err)
+		}
+		query = descClient.totalQuery(id, from, to, cov)
+	}
+
+	count, err := r.queryCount(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("get active clients count: %w", err)
+	}
+	return count, nil
+}
+
+// GetActiveChannels returns the active channels of the given project.
+func (r *StarRocks) GetActiveChannels(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) ([]types.MetricPoint, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return nil, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT 
+	    DATE(timestamp) AS event_date, 
+	    APPROX_COUNT_DISTINCT(channel_key) AS channels
+	FROM 
+	    channel_events
+	WHERE
+		project_id = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s'
+	GROUP BY 
+	    event_date
+	ORDER BY 
+	    event_date ASC;
+	`, id.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descChannel)
+		if err != nil {
+			return nil, fmt.Errorf("get active channels: %w", err)
+		}
+		query = descChannel.seriesQuery(id, from, to, cov)
+	}
+
+	metrics, err := r.queryMetrics(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get active channels: %w", err)
+	}
+	return metrics, nil
+}
+
+// GetActiveChannelsCount returns the active channels count of the given project.
+func (r *StarRocks) GetActiveChannelsCount(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) (int, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return 0, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT 
+	    APPROX_COUNT_DISTINCT(channel_key) AS channels
+	FROM 
+	    channel_events
+	WHERE
+		project_id = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s';
+	`, id.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descChannel)
+		if err != nil {
+			return 0, fmt.Errorf("get active channels count: %w", err)
+		}
+		query = descChannel.totalQuery(id, from, to, cov)
+	}
+
+	count, err := r.queryCount(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("get active channels count: %w", err)
+	}
+	return count, nil
+}
+
+// GetSessions returns the sessions of the given project.
+func (r *StarRocks) GetSessions(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) ([]types.MetricPoint, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return nil, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT 
+	    DATE(timestamp) AS event_date, 
+	    APPROX_COUNT_DISTINCT(session_id) AS sessions
+	FROM 
+	    session_events
+	WHERE
+		project_id = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s'
+	GROUP BY 
+	    event_date
+	ORDER BY 
+	    event_date ASC;
+	`, id.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descSession)
+		if err != nil {
+			return nil, fmt.Errorf("get sessions: %w", err)
+		}
+		metrics, err := readSummary(descSession, func(d metricDesc) ([]types.MetricPoint, error) {
+			return r.queryMetrics(ctx, d.seriesQuery(id, from, to, cov))
+		})
+		if err != nil {
+			return nil, fmt.Errorf("get sessions: %w", err)
+		}
+		return metrics, nil
+	}
+
+	metrics, err := r.queryMetrics(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get sessions: %w", err)
+	}
+	return metrics, nil
+}
+
+// GetSessionsCount returns the sessions count of the given project.
+func (r *StarRocks) GetSessionsCount(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) (int, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return 0, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT 
+	    APPROX_COUNT_DISTINCT(session_id) AS sessions
+	FROM 
+	    session_events
+	WHERE
+		project_id = '%s'
+		AND DATE(timestamp) >= '%s'
+		AND DATE(timestamp) < '%s';
+	`, id.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		cov, err := r.summaryCoverage(ctx, descSession)
+		if err != nil {
+			return 0, fmt.Errorf("get sessions count: %w", err)
+		}
+		count, err := readSummary(descSession, func(d metricDesc) (int, error) {
+			return r.queryCount(ctx, d.totalQuery(id, from, to, cov))
+		})
+		if err != nil {
+			return 0, fmt.Errorf("get sessions count: %w", err)
+		}
+		return count, nil
+	}
+
+	count, err := r.queryCount(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("get sessions count: %w", err)
+	}
+	return count, nil
+}
+
+// GetPeakSessionsPerChannel returns the peak sessions per channel of the given project.
+func (r *StarRocks) GetPeakSessionsPerChannel(
+	ctx context.Context,
+	id types.ID,
+	from, to time.Time,
+) ([]types.MetricPoint, error) {
+	if err := validateTimeRange(from, to); err != nil {
+		return nil, err
+	}
+
+	// NOTE(hackerwins): StarRocks supports MySQL Driver, but it does not support
+	// Prepared Statement. So, we need to use string interpolation to build the query.
+	//nolint:gosec
+	query := fmt.Sprintf(`
+	SELECT 
+	    event_date,
+	    MAX(session_count) AS peak_sessions
+	FROM (
+	    SELECT 
+	        DATE(timestamp) AS event_date,
+	        channel_key,
+	        APPROX_COUNT_DISTINCT(session_id) AS session_count
+	    FROM 
+	        session_events
+	    WHERE
+	        project_id = '%s'
+	        AND DATE(timestamp) >= '%s'
+	        AND DATE(timestamp) < '%s'
+	    GROUP BY 
+	        event_date, channel_key
+	) AS channel_sessions
+	GROUP BY 
+	    event_date
+	ORDER BY 
+	    event_date ASC;
+	`, id.String(), from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	if r.summaryEnabled() {
+		// Peak splits on its own summary's coverage, not on descSession's: the
+		// two tables are refreshed separately and either may lag the other.
+		cov, err := r.summaryCoverage(ctx, descPeak)
+		if err != nil {
+			return nil, fmt.Errorf("get peak sessions per channel: %w", err)
+		}
+		query = descPeak.peakSeriesQuery(id, from, to, cov)
+	}
+
+	metrics, err := r.queryMetrics(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get peak sessions per channel: %w", err)
+	}
+	return metrics, nil
+}
+
+// Close closes the connection to the StarRocks.
+func (r *StarRocks) Close() error {
+	if r.driver == nil {
+		return nil
+	}
+	if err := r.driver.Close(); err != nil {
+		return fmt.Errorf("close: %w", err)
+	}
+
+	return nil
+}
+
+// validateTimeRange validates that the from time is before or equal to the to time.
+func validateTimeRange(from, to time.Time) error {
+	if from.After(to) {
+		return fmt.Errorf("invalid time range")
+	}
+	return nil
+}
+
+// closeRows closes a result set, logging rather than returning a close error:
+// the rows have already been read by the time it runs.
+func closeRows(rows *sql.Rows) {
+	if err := rows.Close(); err != nil {
+		logging.DefaultLogger().Errorf("close rows: %v", err)
+	}
+}
+
+// readSummary runs read with d and, when StarRocks rejects it because d's
+// rollup does not resolve, once more with d reading its summary table. That is
+// a cluster whose summary table predates the rollup, or whose build has not
+// reached FINISHED: the hint names an index the optimizer would otherwise have
+// skipped for it, so the retry is the plan the read had before the hint, and
+// returns the same numbers more slowly. Any other error is the read's answer.
+func readSummary[T any](d metricDesc, read func(metricDesc) (T, error)) (T, error) {
+	v, err := read(d)
+	if d.summaryRollup == "" || !isUnknownTable(err) {
+		return v, err
+	}
+
+	logging.DefaultLogger().Warnf(
+		"read %s instead of %s, which is not queryable yet: %v", d.summaryTable, d.summaryRollup, err,
+	)
+	d.summaryRollup = ""
+	return read(d)
+}
+
+// isUnknownTable reports whether StarRocks rejected a query for naming a table
+// or index it does not have. StarRocks reports every analysis error as 5502, so
+// the message is what tells this one apart. Re-run the TestE2E rehearsal with
+// the rollup dropped when the StarRocks version moves, in case it is reworded.
+func isUnknownTable(err error) bool {
+	var serverErr *mysql.MySQLError
+	return errors.As(err, &serverErr) && strings.Contains(serverErr.Message, "Unknown table")
+}
+
+// queryMetrics queries the metrics from the StarRocks.
+func (r *StarRocks) queryMetrics(ctx context.Context, query string) ([]types.MetricPoint, error) {
+	rows, err := r.driver.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query metrics: %w", err)
+	}
+	defer closeRows(rows)
+
+	var metrics []types.MetricPoint
+	for rows.Next() {
+		var date string
+		var val int32
+
+		if err := rows.Scan(&date, &val); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+
+		t, err := time.Parse("2006-01-02", date)
+		if err != nil {
+			return nil, fmt.Errorf("parse date: %w", err)
+		}
+
+		metrics = append(metrics, types.MetricPoint{
+			Time:  t.Unix(),
+			Value: int(val),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
+	return metrics, nil
+}
+
+// queryCount queries the count from the StarRocks.
+func (r *StarRocks) queryCount(ctx context.Context, query string) (int, error) {
+	rows, err := r.driver.QueryContext(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("query count: %w", err)
+	}
+	defer closeRows(rows)
+
+	var count sql.NullInt64
+	if rows.Next() {
+		if err := rows.Scan(&count); err != nil {
+			return 0, fmt.Errorf("scan row: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate rows: %w", err)
+	}
+	if !count.Valid {
+		return 0, nil
+	}
+	return int(count.Int64), nil
+}

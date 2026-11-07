@@ -1,0 +1,181 @@
+/*
+ * Copyright 2023 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Package inner provides the implementation of Presence.
+// If the client is watching a document, the presence is shared with
+// all other clients watching the same document.
+package inner
+
+import (
+	"maps"
+	"sync"
+	"sync/atomic"
+)
+
+// Map is a multi-routine safe map that stores presences.
+// It uses a read-write mutex to allow concurrent reads and exclusive writes.
+// It also uses an atomic boolean to track whether the map has been copied,
+// which helps in optimizing the memory usage when storing presences in CopyOnWrite mode.
+type Map struct {
+	mu        sync.RWMutex
+	presences map[string]Presence
+	copied    atomic.Bool
+}
+
+// NewMap creates a new instance of Map.
+func NewMap() *Map {
+	return &Map{
+		presences: make(map[string]Presence),
+	}
+}
+
+// Store stores the given presence to the map.
+func (m *Map) Store(clientID string, presence Presence) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.copied.Load() {
+		newPresences := make(map[string]Presence, len(m.presences))
+		maps.Copy(newPresences, m.presences)
+		m.presences = newPresences
+		m.copied.Store(true)
+	}
+
+	m.presences[clientID] = presence.DeepCopy()
+}
+
+// Load returns the presence for the given clientID.
+func (m *Map) Load(clientID string) Presence {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	presence, ok := m.presences[clientID]
+	if !ok {
+		return nil
+	}
+
+	return presence
+}
+
+// LoadOrStore returns the existing presence if exists.
+// Otherwise, it stores and returns the given presence.
+func (m *Map) LoadOrStore(clientID string, presence Presence) Presence {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	actual, ok := m.presences[clientID]
+	if ok {
+		return actual
+	}
+
+	if !m.copied.Load() {
+		newPresences := make(map[string]Presence, len(m.presences))
+		maps.Copy(newPresences, m.presences)
+		m.presences = newPresences
+		m.copied.Store(true)
+	}
+
+	clone := presence.DeepCopy()
+	m.presences[clientID] = clone
+	return clone
+}
+
+// Has returns whether the given clientID exists.
+func (m *Map) Has(clientID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	_, ok := m.presences[clientID]
+	return ok
+}
+
+// Delete deletes the presence for the given clientID.
+func (m *Map) Delete(clientID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.copied.Load() {
+		newPresences := make(map[string]Presence, len(m.presences))
+		for k, v := range m.presences {
+			if k != clientID {
+				newPresences[k] = v
+			}
+		}
+		m.presences = newPresences
+		m.copied.Store(true)
+		return
+	}
+
+	delete(m.presences, clientID)
+}
+
+// DeepCopy copies itself deeply.
+func (m *Map) DeepCopy() *Map {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	clone := &Map{
+		presences: m.presences,
+	}
+	m.copied.Store(false)
+	clone.copied.Store(false)
+	return clone
+}
+
+// ToMap returns a shallow copy of the presence map.
+func (m *Map) ToMap() map[string]Presence {
+	return m.DeepCopy().presences
+}
+
+// Presence represents custom presence that can be defined by the client.
+type Presence map[string]string
+
+// New creates a new instance of Presence.
+func New() Presence {
+	return make(map[string]string)
+}
+
+// Set sets the value of the given key.
+func (p Presence) Set(key string, value string) {
+	p[key] = value
+}
+
+// Remove removes the given key. A key that is not present is left alone.
+func (p Presence) Remove(key string) {
+	delete(p, key)
+}
+
+// Clear removes every key from the presence.
+//
+// It empties the map in place rather than rebinding the receiver to a fresh
+// one: a Presence is a map value that the document's clone and the change
+// payloads hold by header, so assigning through a pointer receiver would only
+// re-point the caller's own copy and leave every other holder -- the clone
+// included -- still reading the cleared keys.
+func (p Presence) Clear() {
+	clear(p)
+}
+
+// DeepCopy copies itself deeply.
+func (p Presence) DeepCopy() Presence {
+	if p == nil {
+		return nil
+	}
+
+	clone := make(map[string]string, len(p))
+	maps.Copy(clone, p)
+	return clone
+}

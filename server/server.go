@@ -1,0 +1,510 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Package server provides the Yorkie server which is the main entry point of the
+// Yorkie system. The server is responsible for starting the RPC server and
+// admin server.
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"os"
+	"strings"
+	gosync "sync"
+	"time"
+
+	"github.com/yorkie-team/yorkie/api/types"
+	"github.com/yorkie-team/yorkie/client"
+	"github.com/yorkie-team/yorkie/pkg/key"
+	"github.com/yorkie-team/yorkie/server/backend"
+	"github.com/yorkie-team/yorkie/server/backend/database"
+	"github.com/yorkie-team/yorkie/server/clients"
+	"github.com/yorkie-team/yorkie/server/documents"
+	"github.com/yorkie-team/yorkie/server/logging"
+	"github.com/yorkie-team/yorkie/server/packs"
+	"github.com/yorkie-team/yorkie/server/profiling"
+	"github.com/yorkie-team/yorkie/server/profiling/prometheus"
+	"github.com/yorkie-team/yorkie/server/projects"
+	"github.com/yorkie-team/yorkie/server/rpc"
+)
+
+// housekeepingState is a common structure to hold the state of housekeeping tasks.
+type housekeepingState struct {
+	gosync.Mutex
+	lastID          types.ID
+	lastServerSeq   int64
+	term            int
+	totalCandidates int
+	totalProcessed  int
+}
+
+// Yorkie is a server of Yorkie.
+// The server receives changes from the client, stores them in the repository,
+// and propagates the changes to clients who subscribe to the document.
+type Yorkie struct {
+	lock gosync.Mutex
+
+	conf            *Config
+	backend         *backend.Backend
+	rpcServer       *rpc.Server
+	profilingServer *profiling.Server
+
+	shutdown   bool
+	shutdownCh chan struct{}
+}
+
+// New creates a new instance of Yorkie.
+func New(conf *Config) (*Yorkie, error) {
+	if err := conf.Validate(); err != nil {
+		return nil, err
+	}
+
+	if err := ensureSecretKey(conf.Backend); err != nil {
+		return nil, err
+	}
+
+	metrics, err := prometheus.NewMetrics()
+	if err != nil {
+		return nil, err
+	}
+
+	be, err := backend.New(
+		conf.Backend,
+		conf.Mongo,
+		conf.Membership,
+		conf.Housekeeping,
+		metrics,
+		conf.Kafka,
+		conf.StarRocks,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	rpcServer, err := rpc.NewServer(conf.RPC, be)
+	if err != nil {
+		return nil, err
+	}
+
+	var profilingServer *profiling.Server
+	if conf.Profiling != nil {
+		profilingServer = profiling.NewServer(conf.Profiling, metrics)
+	}
+
+	return &Yorkie{
+		conf:            conf,
+		backend:         be,
+		rpcServer:       rpcServer,
+		profilingServer: profilingServer,
+		shutdownCh:      make(chan struct{}),
+	}, nil
+}
+
+// SecretKeyEnv is the environment variable the admin token signing key is
+// read from when --backend-secret-key and the config file leave it unset.
+// Deployments should use it: a flag value is visible in the process command
+// line, to anyone who can read /proc or list the process table. The pprof
+// cmdline endpoint no longer publishes it (server/profiling).
+const SecretKeyEnv = "YORKIE_BACKEND_SECRET_KEY" // #nosec G101
+
+// publicSecretKey is the key Yorkie used to fall back to when none was set.
+// It is published in the source history, so it is refused like a blank one.
+const publicSecretKey = "yorkie-secret" // #nosec G101
+
+// secretKeyBytes is the length of a generated admin token signing key: 256
+// bits, the HS256 block the key is hashed into.
+const secretKeyBytes = 32
+
+// secretKeyMinLen is the shortest configured key accepted. RFC 7518 §3.2
+// requires an HMAC-SHA256 key of at least the hash output, 256 bits, and a
+// short key is the one an attacker breaks offline: every admin token carries
+// its own signature, so guessing the key costs no request the server sees.
+const secretKeyMinLen = 32
+
+// ensureSecretKey resolves the admin token signing key: the configured value
+// (flag or config file), then SecretKeyEnv, then a random key. Every way of
+// building a config (CLI flags, config file, NewConfig) reaches here, so an
+// unset key can never fall back to a value anyone can read: the interceptor
+// trusts the token's username claim, so whoever knows the key can act as any
+// user. The generated key lives only in this process, so tokens die with it
+// and other nodes reject them. Single-node and local setups only need to log
+// in again after a restart; a cluster must share one key.
+//
+// A key that is set but blank, or set to the old public default, is an error
+// rather than a reason to generate one: the operator meant to share a key,
+// and a per-process key would make replicas reject each other's tokens
+// without failing anything visibly.
+func ensureSecretKey(conf *backend.Config) error {
+	if conf.SecretKey != "" {
+		key, err := validateSecretKey("--backend-secret-key (Backend.SecretKey)", conf.SecretKey)
+		if err != nil {
+			return err
+		}
+		conf.SecretKey = key
+		return nil
+	}
+
+	if value, ok := os.LookupEnv(SecretKeyEnv); ok {
+		key, err := validateSecretKey(SecretKeyEnv, value)
+		if err != nil {
+			return err
+		}
+		conf.SecretKey = key
+		return nil
+	}
+
+	secret := make([]byte, secretKeyBytes)
+	if _, err := rand.Read(secret); err != nil {
+		return fmt.Errorf("generate backend secret key: %w", err)
+	}
+	conf.SecretKey = base64.RawURLEncoding.EncodeToString(secret)
+
+	logging.DefaultLogger().Error(
+		"backend secret key is empty: signing admin tokens with a random " +
+			"key generated for this process. Tokens are invalidated on " +
+			"restart, and every other replica rejects them, so admin requests " +
+			"behind a load balancer fail on whichever pod did not issue the " +
+			"token. Set " + SecretKeyEnv +
+			" to the same value on every node in production.",
+	)
+	return nil
+}
+
+// validateSecretKey normalizes a configured key and rejects it when it is
+// blank, the old public default, or too short to resist an offline search.
+// The surrounding whitespace is dropped before anything else: `kubectl create
+// secret --from-file` keeps the file's trailing newline, so "yorkie-secret\n"
+// has to be read as the public default rather than as a key of its own, and a
+// key that differs between nodes only by a newline has to match.
+func validateSecretKey(source, value string) (string, error) {
+	key := strings.TrimSpace(value)
+	if key == "" {
+		return "", fmt.Errorf("%s is set but blank: set a shared random key, "+
+			"or unset it to generate one per process", source)
+	}
+	if strings.EqualFold(key, publicSecretKey) {
+		return "", fmt.Errorf("%s is the public default %q: anyone can sign "+
+			"admin tokens with it, set a random key", source, publicSecretKey)
+	}
+	if len(key) < secretKeyMinLen {
+		return "", fmt.Errorf("%s is %d characters: an admin token signing "+
+			"key must be at least %d, or it can be found by trying keys "+
+			"against an issued token. Generate one with: "+
+			"openssl rand -base64 32", source, len(key), secretKeyMinLen)
+	}
+	return key, nil
+}
+
+// Backend returns the backend for testing purposes.
+func (r *Yorkie) Backend() *backend.Backend {
+	return r.backend
+}
+
+// Start starts the server by opening the rpc port.
+func (r *Yorkie) Start() error {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	// ClusterService shares the public RPC port, and an empty secret lets
+	// every request through. Warn instead of refusing to start: single-node
+	// and local setups rely on the empty default.
+	if r.conf.Backend.ClusterSecret == "" {
+		logging.DefaultLogger().Warn(
+			"cluster secret is empty: ClusterService RPCs are not " +
+				"authenticated. Set --cluster-secret in production.",
+		)
+	}
+
+	if r.conf.Backend.WatchHeartbeatInterval != "" {
+		logging.DefaultLogger().Warnf(
+			"WatchHeartbeatInterval (%q) is deprecated and ignored: each client "+
+				"asks for its own heartbeat interval within "+
+				"WatchHeartbeatIntervalMin/Max. Set WatchHeartbeatIntervalMax "+
+				"to 0s to turn heartbeats off.",
+			r.conf.Backend.WatchHeartbeatInterval,
+		)
+	}
+
+	if err := r.RegisterHousekeepingTasks(r.backend); err != nil {
+		return err
+	}
+
+	if err := r.backend.Start(context.Background()); err != nil {
+		return err
+	}
+
+	if r.profilingServer != nil {
+		if err := r.profilingServer.Start(); err != nil {
+			return err
+		}
+	}
+
+	return r.rpcServer.Start()
+}
+
+// Shutdown shuts down this Yorkie server.
+func (r *Yorkie) Shutdown(graceful bool) error {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	if r.shutdown {
+		return nil
+	}
+
+	r.rpcServer.Shutdown(graceful)
+	if r.profilingServer != nil {
+		r.profilingServer.Shutdown(graceful)
+	}
+
+	if err := r.backend.Shutdown(); err != nil {
+		return err
+	}
+
+	close(r.shutdownCh)
+	r.shutdown = true
+	return nil
+}
+
+// ShutdownCh returns the shutdown channel.
+func (r *Yorkie) ShutdownCh() <-chan struct{} {
+	return r.shutdownCh
+}
+
+// RPCAddr returns the address of the RPC.
+func (r *Yorkie) RPCAddr() string {
+	return r.conf.RPCAddr()
+}
+
+// DeactivateClient deactivates the given client. It is used for testing.
+func (r *Yorkie) DeactivateClient(ctx context.Context, c1 *client.Client) error {
+	project, err := r.DefaultProject(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, err = clients.Deactivate(ctx, r.backend, project, types.ClientRefKey{
+		ProjectID: project.ID,
+		ClientID:  types.IDFromActorID(c1.ID()),
+	})
+	return err
+}
+
+// CompactDocument compacts the given document. It is used for testing.
+func (r *Yorkie) CompactDocument(ctx context.Context, docKey key.Key, force bool) error {
+	project, err := r.DefaultProject(ctx)
+	if err != nil {
+		return err
+	}
+
+	// NOTE(hackerwins): This locker is used to prevent concurrent compaction
+	// requests for the same document. And it is also used to prevent
+	// concurrent push/pull requests while compaction is in progress.
+	locker := r.backend.Lockers.Locker(packs.DocKey(project.ID, docKey))
+	defer locker.Unlock()
+
+	docInfo, err := documents.FindDocInfoByKey(ctx, r.backend, project, docKey)
+	if err != nil {
+		return err
+	}
+
+	return packs.Compact(ctx, r.backend, project.ID, docInfo, force)
+}
+
+// RegisterHousekeepingTasks registers housekeeping tasks.
+func (r *Yorkie) RegisterHousekeepingTasks(be *backend.Backend) error {
+	interval, err := be.Housekeeping.Config.ParseInterval()
+	if err != nil {
+		return err
+	}
+
+	deactivateState := &housekeepingState{lastID: database.ZeroID}
+	compactionState := &housekeepingState{lastID: database.ZeroID}
+	statsState := &housekeepingState{lastID: database.ZeroID}
+
+	// Log deactivation task config at registration so operators can grep for
+	// "HSKP: deactivation registered" and verify concurrency mode (parallel
+	// vs sequential fallback) without waiting for the first cycle.
+	deactivateConcurrency := be.Housekeeping.Config.DeactivateConcurrency
+	logging.DefaultLogger().Infof(
+		"HSKP: deactivation registered — interval=%s candidates_limit=%d concurrency=%d",
+		interval, be.Housekeeping.Config.CandidatesLimit, deactivateConcurrency,
+	)
+
+	if err = be.Housekeeping.RegisterTask(interval, func(ctx context.Context) error {
+		deactivateState.Lock()
+		currentLastID := deactivateState.lastID
+		deactivateState.Unlock()
+
+		isNewTerm := currentLastID == database.ZeroID
+
+		start := time.Now()
+		lastID, candidatesCount, processedCount, err := clients.DeactivateInactives(
+			ctx,
+			be,
+			be.Housekeeping.Config.CandidatesLimit,
+			deactivateConcurrency,
+			currentLastID,
+		)
+		if err != nil {
+			return err
+		}
+
+		deactivateState.Lock()
+		if isNewTerm {
+			deactivateState.term++
+		}
+
+		deactivateState.lastID = lastID
+		deactivateState.totalCandidates += candidatesCount
+		deactivateState.totalProcessed += processedCount
+
+		if processedCount > 0 {
+			logging.From(ctx).Infof(
+				"HSKP: deactivation #%d %s candidates %d/%d deactivated %d/%d cc=%d %s",
+				deactivateState.term,
+				currentLastID,
+				candidatesCount,
+				deactivateState.totalCandidates,
+				processedCount,
+				deactivateState.totalProcessed,
+				deactivateConcurrency,
+				time.Since(start),
+			)
+		}
+
+		deactivateState.Unlock()
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := be.Housekeeping.RegisterTask(interval, func(ctx context.Context) error {
+		compactionState.Lock()
+		currentLastServerSeq := compactionState.lastServerSeq
+		currentLastID := compactionState.lastID
+		compactionState.Unlock()
+
+		isNewTerm := currentLastServerSeq == 0 && currentLastID == database.ZeroID
+
+		start := time.Now()
+		lastServerSeq, lastID, candidatesCount, processedCount, err := documents.CompactDocuments(
+			ctx,
+			be,
+			be.Housekeeping.Config.CandidatesLimit,
+			be.Housekeeping.Config.CompactionMinChanges,
+			currentLastServerSeq,
+			currentLastID,
+		)
+		if err != nil {
+			return err
+		}
+
+		compactionState.Lock()
+		if isNewTerm {
+			compactionState.term++
+		}
+
+		compactionState.lastServerSeq = lastServerSeq
+		compactionState.lastID = lastID
+		compactionState.totalCandidates += candidatesCount
+		compactionState.totalProcessed += processedCount
+
+		if processedCount > 0 {
+			logging.From(ctx).Infof(
+				"HSKP: compaction #%d seq:%d id:%s candidates %d/%d compacted %d/%d %s",
+				compactionState.term,
+				currentLastServerSeq,
+				currentLastID,
+				candidatesCount,
+				compactionState.totalCandidates,
+				processedCount,
+				compactionState.totalProcessed,
+				time.Since(start),
+			)
+		}
+
+		compactionState.Unlock()
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	statsInterval, err := be.Housekeeping.Config.ParseProjectStatsRefreshInterval()
+	if err != nil {
+		return err
+	}
+	if statsInterval > 0 {
+		if err := be.Housekeeping.RegisterTask(statsInterval, func(ctx context.Context) error {
+			statsState.Lock()
+			currentLastID := statsState.lastID
+			statsState.Unlock()
+
+			isNewTerm := currentLastID == database.ZeroID
+			start := time.Now()
+
+			lastID, processed, err := projects.RefreshStats(
+				ctx,
+				be,
+				be.Housekeeping.Config.CandidatesLimit,
+				currentLastID,
+			)
+			if err != nil {
+				return err
+			}
+
+			statsState.Lock()
+			if isNewTerm {
+				statsState.term++
+			}
+			statsState.lastID = lastID
+			statsState.totalProcessed += processed
+			if processed > 0 {
+				logging.From(ctx).Infof(
+					"HSKP: project-stats #%d %s refreshed %d/%d %s",
+					statsState.term,
+					currentLastID,
+					processed,
+					statsState.totalProcessed,
+					time.Since(start),
+				)
+			}
+			statsState.Unlock()
+
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// DefaultProject returns the default project.
+func (r *Yorkie) DefaultProject(ctx context.Context) (*types.Project, error) {
+	return projects.GetProjectFromAPIKey(ctx, r.backend, "")
+}
+
+// CreateProject creates a project with the given name.
+func (r *Yorkie) CreateProject(ctx context.Context, name string) (*types.Project, error) {
+	project, err := r.DefaultProject(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return projects.CreateProject(ctx, r.backend, project.Owner, name)
+}

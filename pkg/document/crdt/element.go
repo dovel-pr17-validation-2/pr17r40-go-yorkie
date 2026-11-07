@@ -1,0 +1,78 @@
+/*
+ * Copyright 2020 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package crdt
+
+import (
+	"errors"
+
+	"github.com/yorkie-team/yorkie/pkg/document/resource"
+	"github.com/yorkie-team/yorkie/pkg/document/time"
+)
+
+// ErrChildNotFound is returned when the child is not found in the container.
+var ErrChildNotFound = errors.New("child not found")
+
+// Container represents Array or Object.
+type Container interface {
+	Element
+
+	// Purge physically purges the given child element.
+	Purge(child Element) error
+
+	// Descendants returns all descendants of this container.
+	Descendants(callback func(elem Element, parent Container) bool)
+
+	// DeleteByCreatedAt removes the given element from this container.
+	DeleteByCreatedAt(createdAt *time.Ticket, deletedAt *time.Ticket) (Element, error)
+}
+
+// Element represents JSON element.
+type Element interface {
+	// Marshal returns the JSON encoding of this element.
+	Marshal() string
+
+	// DeepCopy copies itself deeply.
+	DeepCopy() (Element, error)
+
+	// CreatedAt returns the creation time of this element.
+	CreatedAt() *time.Ticket
+
+	// SetCreatedAt sets the creation time of this element manually. It is
+	// used when undo/redo restores a removed element under a freshly
+	// issued identity instead of its original one -- for example, an Add
+	// reverse acting as UndoRemove for an Array element -- mirroring
+	// CRDTElement.setCreatedAt in the JS SDK (element.ts:77-81).
+	SetCreatedAt(createdAt *time.Ticket)
+
+	// MovedAt returns the move time of this element.
+	MovedAt() *time.Ticket
+
+	// SetMovedAt sets the move time of this element.
+	SetMovedAt(*time.Ticket)
+
+	// RemovedAt returns the removal time of this element.
+	RemovedAt() *time.Ticket
+
+	// Remove removes this element.
+	Remove(*time.Ticket) bool
+
+	// MetaSize returns the size of the metadata of this element.
+	MetaSize() int
+
+	// DataSize returns the data usage of this element.
+	DataSize() resource.DataSize
+}

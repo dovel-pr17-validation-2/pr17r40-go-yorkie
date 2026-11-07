@@ -1,0 +1,46 @@
+name: Release Charts
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    permissions:
+      contents: write
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Install Helm
+        # v4 for its node20 runtime; v3 declares `using: node16`, which GitHub
+        # is removing. Inputs are compatible — `version` still defaults to
+        # `latest` — and `token` is dropped rather than carried over because v4
+        # defaults it to `${{ github.token }}` and marks it deprecated
+        # ("GitHub token is no longer required").
+        uses: azure/setup-helm@v4
+
+      - name: Add dependency chart repos
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo add starrocks https://starrocks.github.io/starrocks-kubernetes-operator
+          helm repo add percona https://percona.github.io/percona-helm-charts/
+          helm repo update
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.7.0
+        with:
+          charts_dir: build/charts
+          config: ${{ github.workspace }}/.cr.yaml
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"

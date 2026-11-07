@@ -1,0 +1,1102 @@
+openapi: 3.1.0
+info:
+  description: Yorkie is an open source document store for building collaborative
+    editing applications.
+  title: Yorkie
+  version: v0.7.25
+servers:
+- description: Production server
+  url: https://api.yorkie.dev
+- description: Local server
+  url: http://localhost:8080
+paths:
+  /yorkie.v1.ClusterService/Broadcast:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.Broadcast.yorkie.v1.ClusterServiceBroadcastRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.Broadcast.yorkie.v1.ClusterServiceBroadcastResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+  /yorkie.v1.ClusterService/CompactDocument:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.CompactDocument.yorkie.v1.ClusterServiceCompactDocumentRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.CompactDocument.yorkie.v1.ClusterServiceCompactDocumentResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+  /yorkie.v1.ClusterService/DetachDocument:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.DetachDocument.yorkie.v1.ClusterServiceDetachDocumentRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.DetachDocument.yorkie.v1.ClusterServiceDetachDocumentResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+  /yorkie.v1.ClusterService/GetChannelCount:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.GetChannelCount.yorkie.v1.ClusterServiceGetChannelCountRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.GetChannelCount.yorkie.v1.ClusterServiceGetChannelCountResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+  /yorkie.v1.ClusterService/GetChannels:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.GetChannels.yorkie.v1.ClusterServiceGetChannelsRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.GetChannels.yorkie.v1.ClusterServiceGetChannelsResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+  /yorkie.v1.ClusterService/GetDocument:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.GetDocument.yorkie.v1.ClusterServiceGetDocumentRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.GetDocument.yorkie.v1.ClusterServiceGetDocumentResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+  /yorkie.v1.ClusterService/InvalidateCache:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.InvalidateCache.yorkie.v1.InvalidateCacheRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.InvalidateCache.yorkie.v1.InvalidateCacheResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+  /yorkie.v1.ClusterService/ListChannels:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.ListChannels.yorkie.v1.ClusterServiceListChannelsRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.ListChannels.yorkie.v1.ClusterServiceListChannelsResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+  /yorkie.v1.ClusterService/PurgeDocument:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.PurgeDocument.yorkie.v1.ClusterServicePurgeDocumentRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.PurgeDocument.yorkie.v1.ClusterServicePurgeDocumentResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+  /yorkie.v1.ClusterService/RevalidateAccess:
+    post:
+      description: ""
+      requestBody:
+        $ref: '#/components/requestBodies/yorkie.v1.ClusterService.RevalidateAccess.yorkie.v1.ClusterServiceRevalidateAccessRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/yorkie.v1.ClusterService.RevalidateAccess.yorkie.v1.ClusterServiceRevalidateAccessResponse'
+        default:
+          $ref: '#/components/responses/connect.error'
+      tags:
+      - yorkie.v1.ClusterService
+components:
+  requestBodies:
+    yorkie.v1.ClusterService.Broadcast.yorkie.v1.ClusterServiceBroadcastRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceBroadcastRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceBroadcastRequest'
+      required: true
+    yorkie.v1.ClusterService.CompactDocument.yorkie.v1.ClusterServiceCompactDocumentRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceCompactDocumentRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceCompactDocumentRequest'
+      required: true
+    yorkie.v1.ClusterService.DetachDocument.yorkie.v1.ClusterServiceDetachDocumentRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceDetachDocumentRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceDetachDocumentRequest'
+      required: true
+    yorkie.v1.ClusterService.GetChannelCount.yorkie.v1.ClusterServiceGetChannelCountRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetChannelCountRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetChannelCountRequest'
+      required: true
+    yorkie.v1.ClusterService.GetChannels.yorkie.v1.ClusterServiceGetChannelsRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetChannelsRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetChannelsRequest'
+      required: true
+    yorkie.v1.ClusterService.GetDocument.yorkie.v1.ClusterServiceGetDocumentRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetDocumentRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetDocumentRequest'
+      required: true
+    yorkie.v1.ClusterService.InvalidateCache.yorkie.v1.InvalidateCacheRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.InvalidateCacheRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.InvalidateCacheRequest'
+      required: true
+    yorkie.v1.ClusterService.ListChannels.yorkie.v1.ClusterServiceListChannelsRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceListChannelsRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceListChannelsRequest'
+      required: true
+    yorkie.v1.ClusterService.PurgeDocument.yorkie.v1.ClusterServicePurgeDocumentRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServicePurgeDocumentRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServicePurgeDocumentRequest'
+      required: true
+    yorkie.v1.ClusterService.RevalidateAccess.yorkie.v1.ClusterServiceRevalidateAccessRequest:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceRevalidateAccessRequest'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceRevalidateAccessRequest'
+      required: true
+  responses:
+    connect.error:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/connect.error'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/connect.error'
+      description: ""
+    yorkie.v1.ClusterService.Broadcast.yorkie.v1.ClusterServiceBroadcastResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceBroadcastResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceBroadcastResponse'
+      description: ""
+    yorkie.v1.ClusterService.CompactDocument.yorkie.v1.ClusterServiceCompactDocumentResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceCompactDocumentResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceCompactDocumentResponse'
+      description: ""
+    yorkie.v1.ClusterService.DetachDocument.yorkie.v1.ClusterServiceDetachDocumentResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceDetachDocumentResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceDetachDocumentResponse'
+      description: ""
+    yorkie.v1.ClusterService.GetChannelCount.yorkie.v1.ClusterServiceGetChannelCountResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetChannelCountResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetChannelCountResponse'
+      description: ""
+    yorkie.v1.ClusterService.GetChannels.yorkie.v1.ClusterServiceGetChannelsResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetChannelsResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetChannelsResponse'
+      description: ""
+    yorkie.v1.ClusterService.GetDocument.yorkie.v1.ClusterServiceGetDocumentResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetDocumentResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceGetDocumentResponse'
+      description: ""
+    yorkie.v1.ClusterService.InvalidateCache.yorkie.v1.InvalidateCacheResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.InvalidateCacheResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.InvalidateCacheResponse'
+      description: ""
+    yorkie.v1.ClusterService.ListChannels.yorkie.v1.ClusterServiceListChannelsResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceListChannelsResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceListChannelsResponse'
+      description: ""
+    yorkie.v1.ClusterService.PurgeDocument.yorkie.v1.ClusterServicePurgeDocumentResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServicePurgeDocumentResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServicePurgeDocumentResponse'
+      description: ""
+    yorkie.v1.ClusterService.RevalidateAccess.yorkie.v1.ClusterServiceRevalidateAccessResponse:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceRevalidateAccessResponse'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/yorkie.v1.ClusterServiceRevalidateAccessResponse'
+      description: ""
+  schemas:
+    connect.error:
+      additionalProperties: false
+      description: 'Error type returned by Connect: https://connectrpc.com/docs/go/errors/#http-representation'
+      properties:
+        code:
+          enum:
+          - CodeCanceled
+          - CodeUnknown
+          - CodeInvalidArgument
+          - CodeDeadlineExceeded
+          - CodeNotFound
+          - CodeAlreadyExists
+          - CodePermissionDenied
+          - CodeResourceExhausted
+          - CodeFailedPrecondition
+          - CodeAborted
+          - CodeOutOfRange
+          - CodeInternal
+          - CodeUnavailable
+          - CodeDataLoss
+          - CodeUnauthenticated
+          examples:
+          - CodeNotFound
+          type: string
+        message:
+          type: string
+      title: Connect Error
+      type: object
+    google.protobuf.Timestamp:
+      additionalProperties: false
+      description: |-
+        A Timestamp represents a point in time independent of any time zone or local
+         calendar, encoded as a count of seconds and fractions of seconds at
+         nanosecond resolution. The count is relative to an epoch at UTC midnight on
+         January 1, 1970, in the proleptic Gregorian calendar which extends the
+         Gregorian calendar backwards to year one.
+
+         All minutes are 60 seconds long. Leap seconds are "smeared" so that no leap
+         second table is needed for interpretation, using a [24-hour linear
+         smear](https://developers.google.com/time/smear).
+
+         The range is from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59.999999999Z. By
+         restricting to that range, we ensure that we can convert to and from [RFC
+         3339](https://www.ietf.org/rfc/rfc3339.txt) date strings.
+
+         # Examples
+
+         Example 1: Compute Timestamp from POSIX `time()`.
+
+             Timestamp timestamp;
+             timestamp.set_seconds(time(NULL));
+             timestamp.set_nanos(0);
+
+         Example 2: Compute Timestamp from POSIX `gettimeofday()`.
+
+             struct timeval tv;
+             gettimeofday(&tv, NULL);
+
+             Timestamp timestamp;
+             timestamp.set_seconds(tv.tv_sec);
+             timestamp.set_nanos(tv.tv_usec * 1000);
+
+         Example 3: Compute Timestamp from Win32 `GetSystemTimeAsFileTime()`.
+
+             FILETIME ft;
+             GetSystemTimeAsFileTime(&ft);
+             UINT64 ticks = (((UINT64)ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+
+             // A Windows tick is 100 nanoseconds. Windows epoch 1601-01-01T00:00:00Z
+             // is 11644473600 seconds before Unix epoch 1970-01-01T00:00:00Z.
+             Timestamp timestamp;
+             timestamp.set_seconds((INT64) ((ticks / 10000000) - 11644473600LL));
+             timestamp.set_nanos((INT32) ((ticks % 10000000) * 100));
+
+         Example 4: Compute Timestamp from Java `System.currentTimeMillis()`.
+
+             long millis = System.currentTimeMillis();
+
+             Timestamp timestamp = Timestamp.newBuilder().setSeconds(millis / 1000)
+                 .setNanos((int) ((millis % 1000) * 1000000)).build();
+
+         Example 5: Compute Timestamp from Java `Instant.now()`.
+
+             Instant now = Instant.now();
+
+             Timestamp timestamp =
+                 Timestamp.newBuilder().setSeconds(now.getEpochSecond())
+                     .setNanos(now.getNano()).build();
+
+         Example 6: Compute Timestamp from current time in Python.
+
+             timestamp = Timestamp()
+             timestamp.GetCurrentTime()
+
+         # JSON Mapping
+
+         In JSON format, the Timestamp type is encoded as a string in the
+         [RFC 3339](https://www.ietf.org/rfc/rfc3339.txt) format. That is, the
+         format is "{year}-{month}-{day}T{hour}:{min}:{sec}[.{frac_sec}]Z"
+         where {year} is always expressed using four digits while {month}, {day},
+         {hour}, {min}, and {sec} are zero-padded to two digits each. The fractional
+         seconds, which can go up to 9 digits (i.e. up to 1 nanosecond resolution),
+         are optional. The "Z" suffix indicates the timezone ("UTC"); the timezone
+         is required. A proto3 JSON serializer should always use UTC (as indicated by
+         "Z") when printing the Timestamp type and a proto3 JSON parser should be
+         able to accept both UTC and other timezones (as indicated by an offset).
+
+         For example, "2017-01-15T01:30:15.01Z" encodes 15.01 seconds past
+         01:30 UTC on January 15, 2017.
+
+         In JavaScript, one can convert a Date object to this format using the
+         standard
+         [toISOString()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toISOString)
+         method. In Python, a standard `datetime.datetime` object can be converted
+         to this format using
+         [`strftime`](https://docs.python.org/2/library/time.html#time.strftime) with
+         the time format spec '%Y-%m-%dT%H:%M:%S.%fZ'. Likewise, in Java, one can use
+         the Joda Time's [`ISODateTimeFormat.dateTime()`](
+         http://joda-time.sourceforge.net/apidocs/org/joda/time/format/ISODateTimeFormat.html#dateTime()
+         ) to obtain a formatter capable of generating timestamps in this format.
+      format: date-time
+      type: string
+    yorkie.v1.CacheType:
+      description: ""
+      enum:
+      - - CACHE_TYPE_UNSPECIFIED
+        - 0
+        - CACHE_TYPE_PROJECT
+        - 1
+        - CACHE_TYPE_CLIENT
+        - 2
+        - CACHE_TYPE_DOCUMENT
+        - 3
+      title: CacheType
+      type: string
+    yorkie.v1.ChannelSummary:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          title: session_count
+          type: integer
+      title: ChannelSummary
+      type: object
+    yorkie.v1.ClusterServiceBroadcastRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelKey:
+          additionalProperties: false
+          description: ""
+          title: channel_key
+          type: string
+        payload:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: payload
+          type: string
+        projectId:
+          additionalProperties: false
+          description: ""
+          title: project_id
+          type: string
+        topic:
+          additionalProperties: false
+          description: ""
+          title: topic
+          type: string
+      title: ClusterServiceBroadcastRequest
+      type: object
+    yorkie.v1.ClusterServiceBroadcastResponse:
+      additionalProperties: false
+      description: ""
+      title: ClusterServiceBroadcastResponse
+      type: object
+    yorkie.v1.ClusterServiceCompactDocumentRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        documentKey:
+          additionalProperties: false
+          description: ""
+          title: document_key
+          type: string
+        force:
+          additionalProperties: false
+          description: ""
+          title: force
+          type: boolean
+        projectId:
+          additionalProperties: false
+          description: ""
+          title: project_id
+          type: string
+      title: ClusterServiceCompactDocumentRequest
+      type: object
+    yorkie.v1.ClusterServiceCompactDocumentResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        compacted:
+          additionalProperties: false
+          description: ""
+          title: compacted
+          type: boolean
+      title: ClusterServiceCompactDocumentResponse
+      type: object
+    yorkie.v1.ClusterServiceDetachDocumentRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientId:
+          additionalProperties: false
+          description: ""
+          title: client_id
+          type: string
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        documentKey:
+          additionalProperties: false
+          description: ""
+          title: document_key
+          type: string
+        project:
+          $ref: '#/components/schemas/yorkie.v1.Project'
+          additionalProperties: false
+          description: ""
+          title: project
+          type: object
+      title: ClusterServiceDetachDocumentRequest
+      type: object
+    yorkie.v1.ClusterServiceDetachDocumentResponse:
+      additionalProperties: false
+      description: ""
+      title: ClusterServiceDetachDocumentResponse
+      type: object
+    yorkie.v1.ClusterServiceGetChannelCountRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        projectId:
+          additionalProperties: false
+          description: ""
+          title: project_id
+          type: string
+      title: ClusterServiceGetChannelCountRequest
+      type: object
+    yorkie.v1.ClusterServiceGetChannelCountResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelCount:
+          additionalProperties: false
+          description: ""
+          title: channel_count
+          type: integer
+      title: ClusterServiceGetChannelCountResponse
+      type: object
+    yorkie.v1.ClusterServiceGetChannelsRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        channelKeys:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: channel_keys
+          type: array
+        includeSubPath:
+          additionalProperties: false
+          description: ""
+          title: include_sub_path
+          type: boolean
+        projectId:
+          additionalProperties: false
+          description: ""
+          title: project_id
+          type: string
+      title: ClusterServiceGetChannelsRequest
+      type: object
+    yorkie.v1.ClusterServiceGetChannelsResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        channels:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.ChannelSummary'
+            type: object
+          title: channels
+          type: array
+      title: ClusterServiceGetChannelsResponse
+      type: object
+    yorkie.v1.ClusterServiceGetDocumentRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        documentKey:
+          additionalProperties: false
+          description: ""
+          title: document_key
+          type: string
+        includePresences:
+          additionalProperties: false
+          description: ""
+          title: include_presences
+          type: boolean
+        includeRoot:
+          additionalProperties: false
+          description: ""
+          title: include_root
+          type: boolean
+        project:
+          $ref: '#/components/schemas/yorkie.v1.Project'
+          additionalProperties: false
+          description: ""
+          title: project
+          type: object
+      title: ClusterServiceGetDocumentRequest
+      type: object
+    yorkie.v1.ClusterServiceGetDocumentResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        document:
+          $ref: '#/components/schemas/yorkie.v1.DocumentSummary'
+          additionalProperties: false
+          description: ""
+          title: document
+          type: object
+      title: ClusterServiceGetDocumentResponse
+      type: object
+    yorkie.v1.ClusterServiceListChannelsRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        limit:
+          additionalProperties: false
+          description: ""
+          title: limit
+          type: integer
+        projectId:
+          additionalProperties: false
+          description: ""
+          title: project_id
+          type: string
+        query:
+          additionalProperties: false
+          description: ""
+          title: query
+          type: string
+      title: ClusterServiceListChannelsRequest
+      type: object
+    yorkie.v1.ClusterServiceListChannelsResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        channels:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.ChannelSummary'
+            type: object
+          title: channels
+          type: array
+      title: ClusterServiceListChannelsResponse
+      type: object
+    yorkie.v1.ClusterServicePurgeDocumentRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        documentId:
+          additionalProperties: false
+          description: ""
+          title: document_id
+          type: string
+        documentKey:
+          additionalProperties: false
+          description: ""
+          title: document_key
+          type: string
+        projectId:
+          additionalProperties: false
+          description: ""
+          title: project_id
+          type: string
+      title: ClusterServicePurgeDocumentRequest
+      type: object
+    yorkie.v1.ClusterServicePurgeDocumentResponse:
+      additionalProperties: false
+      description: ""
+      title: ClusterServicePurgeDocumentResponse
+      type: object
+    yorkie.v1.ClusterServiceRevalidateAccessRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        keys:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: keys
+          type: array
+        projectId:
+          additionalProperties: false
+          description: ""
+          title: project_id
+          type: string
+      title: ClusterServiceRevalidateAccessRequest
+      type: object
+    yorkie.v1.ClusterServiceRevalidateAccessResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        closedStreams:
+          additionalProperties: false
+          description: ""
+          title: closed_streams
+          type: integer
+      title: ClusterServiceRevalidateAccessResponse
+      type: object
+    yorkie.v1.DataSize:
+      additionalProperties: false
+      description: ""
+      properties:
+        data:
+          additionalProperties: false
+          description: ""
+          title: data
+          type: integer
+        meta:
+          additionalProperties: false
+          description: ""
+          title: meta
+          type: integer
+      title: DataSize
+      type: object
+    yorkie.v1.DocSize:
+      additionalProperties: false
+      description: ""
+      properties:
+        gc:
+          $ref: '#/components/schemas/yorkie.v1.DataSize'
+          additionalProperties: false
+          description: ""
+          title: gc
+          type: object
+        live:
+          $ref: '#/components/schemas/yorkie.v1.DataSize'
+          additionalProperties: false
+          description: ""
+          title: live
+          type: object
+      title: DocSize
+      type: object
+    yorkie.v1.DocumentSummary:
+      additionalProperties: false
+      description: ""
+      properties:
+        accessedAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: accessed_at
+          type: object
+        attachedClients:
+          additionalProperties: false
+          description: ""
+          title: attached_clients
+          type: integer
+        createdAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        documentSize:
+          $ref: '#/components/schemas/yorkie.v1.DocSize'
+          additionalProperties: false
+          description: ""
+          title: document_size
+          type: object
+        id:
+          additionalProperties: false
+          description: ""
+          title: id
+          type: string
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        presences:
+          additionalProperties: false
+          description: ""
+          title: presences
+          type: object
+        root:
+          additionalProperties: false
+          description: ""
+          title: root
+          type: string
+        schemaKey:
+          additionalProperties: false
+          description: ""
+          title: schema_key
+          type: string
+        updatedAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: updated_at
+          type: object
+      title: DocumentSummary
+      type: object
+    yorkie.v1.DocumentSummary.PresencesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.Presence'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: PresencesEntry
+      type: object
+    yorkie.v1.InvalidateCacheRequest:
+      additionalProperties: false
+      description: ""
+      properties:
+        cacheType:
+          $ref: '#/components/schemas/yorkie.v1.CacheType'
+          additionalProperties: false
+          description: ""
+          title: cache_type
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+      title: InvalidateCacheRequest
+      type: object
+    yorkie.v1.InvalidateCacheResponse:
+      additionalProperties: false
+      description: ""
+      properties:
+        success:
+          additionalProperties: false
+          description: ""
+          title: success
+          type: boolean
+      title: InvalidateCacheResponse
+      type: object
+    yorkie.v1.Presence:
+      additionalProperties: false
+      description: ""
+      properties:
+        data:
+          additionalProperties: false
+          description: ""
+          title: data
+          type: object
+      title: Presence
+      type: object
+    yorkie.v1.Presence.DataEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: DataEntry
+      type: object
+    yorkie.v1.Project:
+      additionalProperties: false
+      description: ""
+      properties:
+        allowedOrigins:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: allowed_origins
+          type: array
+        authWebhookMaxRetries:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: auth_webhook_max_retries
+        authWebhookMaxWaitInterval:
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_max_wait_interval
+          type: string
+        authWebhookMethods:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: auth_webhook_methods
+          type: array
+        authWebhookMinWaitInterval:
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_min_wait_interval
+          type: string
+        authWebhookRequestTimeout:
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_request_timeout
+          type: string
+        authWebhookUrl:
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_url
+          type: string
+        autoRevisionEnabled:
+          additionalProperties: false
+          description: ""
+          title: auto_revision_enabled
+          type: boolean
+        channelSessionTtl:
+          additionalProperties: false
+          description: ""
+          title: channel_session_ttl
+          type: string
+        clientDeactivateThreshold:
+          additionalProperties: false
+          description: ""
+          title: client_deactivate_threshold
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        eventWebhookEvents:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: event_webhook_events
+          type: array
+        eventWebhookMaxRetries:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: event_webhook_max_retries
+        eventWebhookMaxWaitInterval:
+          additionalProperties: false
+          description: ""
+          title: event_webhook_max_wait_interval
+          type: string
+        eventWebhookMinWaitInterval:
+          additionalProperties: false
+          description: ""
+          title: event_webhook_min_wait_interval
+          type: string
+        eventWebhookRequestTimeout:
+          additionalProperties: false
+          description: ""
+          title: event_webhook_request_timeout
+          type: string
+        eventWebhookUrl:
+          additionalProperties: false
+          description: ""
+          title: event_webhook_url
+          type: string
+        id:
+          additionalProperties: false
+          description: ""
+          title: id
+          type: string
+        maxAttachmentsPerDocument:
+          additionalProperties: false
+          description: ""
+          title: max_attachments_per_document
+          type: integer
+        maxSizePerDocument:
+          additionalProperties: false
+          description: ""
+          title: max_size_per_document
+          type: integer
+        maxSubscribersPerDocument:
+          additionalProperties: false
+          description: ""
+          title: max_subscribers_per_document
+          type: integer
+        name:
+          additionalProperties: false
+          description: ""
+          title: name
+          type: string
+        publicKey:
+          additionalProperties: false
+          description: ""
+          title: public_key
+          type: string
+        removeOnDetach:
+          additionalProperties: false
+          description: ""
+          title: remove_on_detach
+          type: boolean
+        secretKey:
+          additionalProperties: false
+          description: ""
+          title: secret_key
+          type: string
+        snapshotInterval:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: snapshot_interval
+        snapshotThreshold:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: snapshot_threshold
+        updatedAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: updated_at
+          type: object
+      title: Project
+      type: object
+  securitySchemes:
+    ApiKeyAuth:
+      in: header
+      name: Authorization
+      type: apiKey
+security:
+- ApiKeyAuth: []
+tags:
+- description: ClusterService is a service that provides an API for Cluster.
+  name: yorkie.v1.ClusterService

@@ -1,0 +1,665 @@
+/*
+ * Copyright 2022 The Yorkie Authors. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+syntax = "proto3";
+
+package yorkie.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+
+option go_package = "github.com/yorkie-team/yorkie/api/yorkie/v1;v1";
+
+option java_multiple_files = true;
+option java_package = "dev.yorkie.api.v1";
+
+/////////////////////////////////////////
+// Messages for Snapshot               //
+/////////////////////////////////////////
+message Snapshot {
+  JSONElement root = 1;
+  map<string, Presence> presences = 2;
+}
+
+/////////////////////////////////////////
+// Messages for ChangePack             //
+/////////////////////////////////////////
+
+// ChangePack is a message that contains all changes that occurred in a document.
+// It is used to synchronize changes between clients and servers.
+message ChangePack {
+  string document_key = 1;
+  Checkpoint checkpoint = 2;
+  bytes snapshot = 3;
+  repeated Change changes = 4;
+  // min_synced_ticket is superseded by version_vector and is written by no
+  // SDK and read by no server. It stays declared rather than `reserved`
+  // because the repository gates proto changes on buf's FILE category, whose
+  // FIELD_NO_DELETE fires on a removed number even when it is reserved.
+  TimeTicket min_synced_ticket = 5 [deprecated = true];
+  bool is_removed = 6;
+  VersionVector version_vector = 7;
+  int64 epoch = 8;
+  // capabilities is the negotiation channel for wire features a peer may not
+  // understand. A server sets it on the pack it returns to advertise what it
+  // supports; a client must treat absence as "unsupported" rather than as
+  // "unknown", because a server that predates a feature cannot say so.
+  //
+  // It exists because a server does not store the bytes a client sent: it
+  // re-encodes from its own domain model, so a field it does not know is
+  // dropped from the stored change log and the push still succeeds. Without a
+  // handshake a client cannot tell that its restore was silently downgraded to
+  // an ordinary insert. Measured against a pinned v0.7.20 server.
+  repeated string capabilities = 9;
+}
+
+message Change {
+  ChangeID id = 1;
+  string message = 2;
+  repeated Operation operations = 3;
+  PresenceChange presence_change = 4;
+}
+
+message ChangeID {
+  uint32 client_seq = 1;
+  int64 server_seq = 2; 
+  int64 lamport = 3;
+  bytes actor_id = 4;
+  VersionVector version_vector = 5;
+}
+
+message VersionVector {
+  map<string, int64> vector = 1;
+}
+
+message Operation {
+  message Set {
+    TimeTicket parent_created_at = 1;
+    string key = 2;
+    JSONElementSimple value = 3;
+    TimeTicket executed_at = 4;
+    RestoreMode restore_mode = 5;
+  }
+  message Add {
+    TimeTicket parent_created_at = 1;
+    TimeTicket prev_created_at = 2;
+    JSONElementSimple value = 3;
+    TimeTicket executed_at = 4;
+    RestoreMode restore_mode = 5;
+  }
+  message Move {
+    TimeTicket parent_created_at = 1;
+    TimeTicket prev_created_at = 2;
+    TimeTicket created_at = 3;
+    TimeTicket executed_at = 4;
+  }
+  message Remove {
+    TimeTicket parent_created_at = 1;
+    TimeTicket created_at = 2;
+    TimeTicket executed_at = 3;
+  }
+  message Edit {
+    TimeTicket parent_created_at = 1;
+    TextNodePos from = 2;
+    TextNodePos to = 3;
+    // created_at_map_by_actor is superseded by the change's version vector and
+    // is written by no SDK. See ChangePack.min_synced_ticket for why it is
+    // deprecated rather than reserved.
+    map<string, TimeTicket> created_at_map_by_actor = 4 [deprecated = true];
+    string content = 5;
+    TimeTicket executed_at = 6;
+    map<string, string> attributes = 7;
+    repeated RestoreSpan restore_spans = 8; // identity-preserving undo/redo
+    RestoreMode restore_mode = 9;
+    // retombstone_spans is the companion span set for an identity-preserving
+    // reverse op: restore_spans is content the reversed edit removed (to
+    // revive), retombstone_spans is content it inserted (to re-remove). Both
+    // are addressed by original identity so a revived neighbour keeps its
+    // relative order across chained undo/redo. restore_mode selects direction.
+    repeated RestoreSpan retombstone_spans = 10;
+  }
+  message Style {
+    TimeTicket parent_created_at = 1;
+    TextNodePos from = 2;
+    TextNodePos to = 3;
+    map<string, string> attributes = 4;
+    TimeTicket executed_at = 5;
+    // Deprecated for the same reason as Edit.created_at_map_by_actor.
+    map<string, TimeTicket> created_at_map_by_actor = 6 [deprecated = true];
+    repeated string attributes_to_remove = 7;
+  }
+  message Increase {
+    TimeTicket parent_created_at = 1;
+    JSONElementSimple value = 2;
+    TimeTicket executed_at = 3;
+    string actor = 4;
+  }
+  message TreeEdit {
+    TimeTicket parent_created_at = 1;
+    TreePos from = 2;
+    TreePos to = 3;
+    // Deprecated for the same reason as Edit.created_at_map_by_actor.
+    map<string, TimeTicket> created_at_map_by_actor = 4 [deprecated = true];
+    repeated TreeNodes contents = 5;
+    int32 split_level = 7;
+    TimeTicket executed_at = 6;
+    repeated TreeRestoreSpan restore_spans = 8; // identity-preserving undo/redo
+    RestoreMode restore_mode = 9;
+    repeated TreeRestoreSpan retombstone_spans = 10;
+    // split_tickets carries the tickets the originating replica issued for the
+    // nodes an element split creates, in issue order. Empty for a change
+    // written before this field existed, which replays through the simulation
+    // that reconstructed them from executed_at and the content count.
+    repeated TimeTicket split_tickets = 11;
+  }
+  message TreeStyle {
+    TimeTicket parent_created_at = 1;
+    TreePos from = 2;
+    TreePos to = 3;
+    map<string, string> attributes = 4;
+    TimeTicket executed_at = 5;
+    repeated string attributes_to_remove = 6;
+    // Deprecated for the same reason as Edit.created_at_map_by_actor.
+    map<string, TimeTicket> created_at_map_by_actor = 7 [deprecated = true];
+  }
+  message ArraySet {
+    TimeTicket parent_created_at = 1;
+    TimeTicket created_at = 2;
+    JSONElementSimple value = 3;
+    TimeTicket executed_at = 4;
+    RestoreMode restore_mode = 5;
+  }
+
+  oneof body {
+    Set set = 1;
+    Add add = 2;
+    Move move = 3;
+    Remove remove = 4;
+    Edit edit = 5;
+    Style style = 7;
+    Increase increase = 8;
+    TreeEdit tree_edit = 9;
+    TreeStyle tree_style = 10;
+    ArraySet array_set = 11;
+  }
+}
+
+// JSONElementSimple is the value an operation carries: the element's identity
+// plus its encoded contents. Its moved_at and removed_at carry no lifecycle
+// state -- nothing ever wrote them, because an element reaching a replica
+// inside an operation has neither moved nor been removed yet. The snapshot
+// form, JSONElement, is where both are actually populated.
+message JSONElementSimple {
+  TimeTicket created_at = 1;
+  // Never written. See the message comment; deprecated rather than reserved
+  // for the reason given on ChangePack.min_synced_ticket.
+  TimeTicket moved_at = 2 [deprecated = true];
+  TimeTicket removed_at = 3 [deprecated = true];
+  ValueType type = 4;
+  bytes value = 5;
+}
+
+/////////////////////////////////////////
+// Messages for JSON                   //
+/////////////////////////////////////////
+
+message JSONElement {
+  message JSONObject {
+    repeated RHTNode nodes = 1;
+    TimeTicket created_at = 2;
+    TimeTicket moved_at = 3;
+    TimeTicket removed_at = 4;
+    // revived_at is the revive half of the liveness register. See the comment
+    // on RestoreMode for why an element needs one.
+    TimeTicket revived_at = 5;
+  }
+  message JSONArray {
+    repeated RGANode nodes = 1;
+    TimeTicket created_at = 2;
+    TimeTicket moved_at = 3;
+    TimeTicket removed_at = 4;
+    TimeTicket revived_at = 5;
+  }
+  message Primitive {
+    ValueType type = 1;
+    bytes value = 2;
+    TimeTicket created_at = 3;
+    TimeTicket moved_at = 4;
+    TimeTicket removed_at = 5;
+    TimeTicket revived_at = 6;
+  }
+  message Text {
+    repeated TextNode nodes = 1;
+    TimeTicket created_at = 2;
+    TimeTicket moved_at = 3;
+    TimeTicket removed_at = 4;
+    TimeTicket revived_at = 5;
+  }
+  message Counter {
+    ValueType type = 1;
+    bytes value = 2;
+    TimeTicket created_at = 3;
+    TimeTicket moved_at = 4;
+    TimeTicket removed_at = 5;
+    reserved 6; // was is_dedup, now encoded in ValueType
+    bytes hll_registers = 7;
+    TimeTicket revived_at = 8;
+  }
+  message Tree {
+    repeated TreeNode nodes = 1;
+    TimeTicket created_at = 2;
+    TimeTicket moved_at = 3;
+    TimeTicket removed_at = 4;
+    TimeTicket revived_at = 5;
+  }
+
+  oneof body {
+    JSONObject json_object = 1;
+    JSONArray json_array = 2;
+    Primitive primitive = 3;
+    Text text = 5;
+    Counter counter = 6;
+    Tree tree = 7;
+  }
+}
+
+message RHTNode {
+  string key = 1;
+  JSONElement element = 2;
+}
+
+// RGANode is one position slot of an array, serialized as a flat repeated
+// field by its container rather than as a linked list. The recursive `next`
+// is a leftover of the linked-list form: nothing writes it, and because it
+// stays declared, a server unmarshalling element bytes is still obliged to be
+// ready to parse a chain as deep as the array is long.
+message RGANode {
+  // Never written; the container's flat `nodes` carries the order instead.
+  // Deprecated rather than reserved for the reason given on
+  // ChangePack.min_synced_ticket.
+  RGANode next = 1 [deprecated = true];
+  JSONElement element = 2;
+  TimeTicket position_created_at = 3;
+  TimeTicket position_moved_at = 4;
+  TimeTicket position_removed_at = 5;
+}
+
+message NodeAttr {
+  string value = 1;
+  TimeTicket updated_at = 2;
+  bool is_removed = 3;
+}
+
+message TextNode {
+  TextNodeID id = 1;
+  string value = 2;
+  TimeTicket removed_at = 3;
+  TextNodeID ins_prev_id = 4;
+  map<string, NodeAttr> attributes = 5;
+  // removal_events is the removal ledger beyond removed_at: every removal of
+  // this node and every undo that cancelled one, except removed_at itself.
+  // An actor's events alternate in ticket order, a removal then the undo
+  // cancelling it, so each is told apart by its place. Empty when removed_at
+  // says it all. A piece recreated after GC records a stand-in removal by the
+  // undoing actor at lamport 0, then its cancel. The pairing relies on an
+  // undo cancelling only its own actor's removal; a change to that rule needs
+  // a new field, not a new reading of this one.
+  repeated TimeTicket removal_events = 6;
+}
+
+message TextNodeID {
+  TimeTicket created_at = 1;
+  int32 offset = 2;
+}
+
+message TreeNode {
+  TreeNodeID id = 1;
+  string type = 2;
+  string value = 3;
+  TimeTicket removed_at = 4;
+  TreeNodeID ins_prev_id = 5;
+  TreeNodeID ins_next_id = 6;
+  int32 depth = 7;
+  map<string, NodeAttr> attributes = 8;
+  // merged_from is set when this node was moved to a new parent by a
+  // concurrent merge. It points to the source parent's ID.
+  TreeNodeID merged_from = 9;
+  // merged_at records the immutable ticket of the merge operation.
+  // Stored alongside merged_from because the source parent's removed_at
+  // may be overwritten by later LWW tombstones and thus cannot serve as
+  // the merge-time causal boundary for SplitElement. See
+  // docs/design/concurrent-merge-split.md for details.
+  TimeTicket merged_at = 10;
+}
+
+message TreeNodes {
+  repeated TreeNode content = 1;
+}
+
+message TreeNodeID {
+  TimeTicket created_at = 1;
+  int32 offset = 2;
+}
+
+message TreePos {
+  TreeNodeID parent_id = 1;
+  TreeNodeID left_sibling_id = 2;
+}
+
+/////////////////////////////////////////
+// Messages for Common                 //
+/////////////////////////////////////////
+
+message User {
+  string id = 1;
+  string auth_provider = 2;
+  string username = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message Member {
+  string id = 1;
+  string project_id = 2;
+  string user_id = 3;
+  string username = 4;
+  string role = 5;
+  google.protobuf.Timestamp invited_at = 6;
+}
+
+message Project {
+  string id = 1;
+  string name = 2;
+  string public_key = 3;
+  string secret_key = 4;
+  string auth_webhook_url = 5;
+  repeated string auth_webhook_methods = 6;
+  uint64 auth_webhook_max_retries = 17;
+  string auth_webhook_min_wait_interval = 18;
+  string auth_webhook_max_wait_interval = 19;
+  string auth_webhook_request_timeout = 20;
+  string event_webhook_url = 7;
+  repeated string event_webhook_events = 8;
+  uint64 event_webhook_max_retries = 21;
+  string event_webhook_min_wait_interval = 22;
+  string event_webhook_max_wait_interval = 23;
+  string event_webhook_request_timeout = 24;
+  string client_deactivate_threshold = 9;
+  int64 snapshot_threshold = 25;
+  int64 snapshot_interval = 26;
+  int32 max_subscribers_per_document = 10;
+  int32 max_attachments_per_document = 11;
+  int32 max_size_per_document = 15;
+  bool remove_on_detach = 16;
+  bool auto_revision_enabled = 27;
+  string channel_session_ttl = 28;
+  repeated string allowed_origins = 14;
+  google.protobuf.Timestamp created_at = 12;
+  google.protobuf.Timestamp updated_at = 13;
+}
+
+message MetricPoint {
+  int64 timestamp = 1;
+  int32 value = 2;
+}
+
+message UpdatableProjectFields {
+  message AuthWebhookMethods {
+    repeated string methods = 1;
+  }
+
+  message EventWebhookEvents {
+    repeated string events = 1;
+  }
+
+  message AllowedOrigins {
+    repeated string origins = 1;
+  }
+
+  google.protobuf.StringValue name = 1;
+  google.protobuf.StringValue auth_webhook_url = 2;
+  AuthWebhookMethods auth_webhook_methods = 3;
+  google.protobuf.UInt64Value auth_webhook_max_retries = 12;
+  google.protobuf.StringValue auth_webhook_min_wait_interval = 13;
+  google.protobuf.StringValue auth_webhook_max_wait_interval = 14;
+  google.protobuf.StringValue auth_webhook_request_timeout = 15;
+  google.protobuf.StringValue event_webhook_url = 4;
+  EventWebhookEvents event_webhook_events = 5;
+  google.protobuf.UInt64Value event_webhook_max_retries = 16;
+  google.protobuf.StringValue event_webhook_min_wait_interval = 17;
+  google.protobuf.StringValue event_webhook_max_wait_interval = 18;
+  google.protobuf.StringValue event_webhook_request_timeout = 19;
+  google.protobuf.Int64Value snapshot_threshold = 20;
+  google.protobuf.Int64Value snapshot_interval = 21;
+  google.protobuf.StringValue client_deactivate_threshold = 6;
+  google.protobuf.Int32Value max_subscribers_per_document = 7;
+  google.protobuf.Int32Value max_attachments_per_document = 8;
+  google.protobuf.Int32Value max_size_per_document = 10;
+  google.protobuf.BoolValue remove_on_detach = 11;
+  google.protobuf.BoolValue auto_revision_enabled = 22;
+  google.protobuf.StringValue channel_session_ttl = 23;
+  AllowedOrigins allowed_origins = 9;
+}
+
+message DocumentSummary {
+  string id = 1;
+  string key = 2;
+  string root = 3;
+  int32 attached_clients = 7;
+  DocSize document_size = 8;
+  string schema_key = 9;
+  map<string, Presence> presences = 10;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp accessed_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message PresenceChange {
+  enum ChangeType {
+    CHANGE_TYPE_UNSPECIFIED = 0;
+    CHANGE_TYPE_PUT = 1;
+    CHANGE_TYPE_DELETE = 2;
+    CHANGE_TYPE_CLEAR = 3;
+    // CHANGE_TYPE_PATCH carries only the top-level keys that changed since
+    // the sender's previous presence: set entries in presence, deleted keys
+    // in removed_keys. Clients send it only to a server that advertises the
+    // "presence-patch" capability on ChangePack. The server folds it into
+    // a CHANGE_TYPE_PUT of the full presence before storing, so it never
+    // appears in a pulled change.
+    CHANGE_TYPE_PATCH = 4;
+  }
+  ChangeType type = 1;
+  Presence presence = 2;
+  // removed_keys lists the top-level keys a CHANGE_TYPE_PATCH deletes. Unused
+  // by the other change types.
+  repeated string removed_keys = 3;
+}
+
+message Presence {
+  map<string, string> data = 1;
+}
+
+message ChannelSummary {
+  string key = 1;
+  int32 session_count = 2;
+}
+
+message Checkpoint {
+  int64 server_seq = 1; 
+  uint32 client_seq = 2;
+}
+
+message TextNodePos {
+  TimeTicket created_at = 1;
+  int32 offset = 2;
+  int32 relative_offset = 3;
+}
+
+// RestoreSpan carries a run of characters from a single original text
+// insertion, addressed by split-invariant absolute offsets [start, end),
+// for identity-preserving undo/redo. content and attributes are a deep
+// copy of the removed value so restore is independent of GC state.
+message RestoreSpan {
+  TimeTicket created_at = 1;
+  int32 start = 2;
+  int32 end = 3;
+  string content = 4;
+  map<string, string> attributes = 5;
+}
+
+// RestoreMode selects the identity-preserving path. RESTORE_MODE_UNSPECIFIED
+// means an ordinary edit (no restore semantics), keeping forward edits
+// unchanged on the wire.
+//
+// For elements it selects between reviving the element already in the tree and
+// inserting a copy of it. The copy is what undo does today, and because a
+// deep copy keeps every descendant's created_at, it puts a second live element
+// under ids the document is indexed by. Reviving needs a replicated liveness
+// register -- removed_at paired with revived_at on each element -- so that
+// every replica resolves a remove/revive race the same way, with a tie going
+// to the removal as the shipped remove register already does.
+//
+// The branch cannot be chosen from local state. A replica that collected
+// between the removal and the undo has purged the tombstone, and one that
+// joined from a later snapshot never had it, so "revive if a tombstone is
+// present" is a function of local collection timing and the same change log
+// would produce different documents. That is why the branch is on the wire.
+enum RestoreMode {
+  RESTORE_MODE_UNSPECIFIED = 0;
+  RESTORE_MODE_RESTORE = 1;
+  RESTORE_MODE_RETOMBSTONE = 2;
+}
+
+// TreeRestoreSpan carries a tree node run from a single deletion, addressed
+// by TreeNodeID identity, for identity-preserving Tree undo/redo. Unlike the
+// text RestoreSpan (flat offsets), a tree span records the node's structure
+// (type/attrs) and its position anchors, because in a tree id-order is not
+// sibling-order: left_sibling_id and right_sibling_id are redundant external
+// boundary anchors of the deleted run, so restore can reconstruct the run's
+// internal order from the op's own spans and needs only one surviving
+// boundary to place it. value/attributes are a deep copy so a GC-purged node
+// can be recreated.
+message TreeRestoreSpan {
+  TreeNodeID id = 1;
+  string node_type = 2;
+  bool is_text = 3;
+  int32 length = 4;
+  string value = 5;
+  map<string, NodeAttr> attributes = 6;
+  TreeNodeID parent_id = 7;
+  TreeNodeID left_sibling_id = 8;
+  TreeNodeID right_sibling_id = 9;
+}
+
+message TimeTicket {
+  int64 lamport = 1;
+  uint32 delimiter = 2;
+  bytes actor_id = 3;
+}
+
+enum ValueType {
+  VALUE_TYPE_NULL = 0;
+  VALUE_TYPE_BOOLEAN = 1;
+  VALUE_TYPE_INTEGER = 2;
+  VALUE_TYPE_LONG = 3;
+  VALUE_TYPE_DOUBLE = 4;
+  VALUE_TYPE_STRING = 5;
+  VALUE_TYPE_BYTES = 6;
+  VALUE_TYPE_DATE = 7;
+  VALUE_TYPE_JSON_OBJECT = 8;
+  VALUE_TYPE_JSON_ARRAY = 9;
+  VALUE_TYPE_TEXT = 10;
+  VALUE_TYPE_INTEGER_CNT = 11;
+  VALUE_TYPE_LONG_CNT = 12;
+  VALUE_TYPE_TREE = 13;
+  VALUE_TYPE_INTEGER_DEDUP_CNT = 14;
+  reserved 15;
+}
+
+enum DocEventType {
+  DOC_EVENT_TYPE_DOCUMENT_CHANGED = 0;
+  DOC_EVENT_TYPE_DOCUMENT_WATCHED = 1;
+  DOC_EVENT_TYPE_DOCUMENT_UNWATCHED = 2;
+  DOC_EVENT_TYPE_DOCUMENT_BROADCAST = 3;
+}
+
+message DocEventBody {
+  string topic = 1;
+  bytes payload = 2;
+}
+
+message DocEvent {
+  DocEventType type = 1;
+  string publisher = 2;
+  DocEventBody body = 3;
+}
+
+message ChannelEvent {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    TYPE_PRESENCE = 1;
+    TYPE_BROADCAST = 2;
+  }
+
+  Type type = 1;
+  string publisher = 2;
+  int64 session_count = 3;
+  int64 seq = 4;
+  string topic = 5;
+  bytes payload = 6;
+}
+
+message DataSize {
+  int32 data = 1;
+  int32 meta = 2;
+}
+
+message DocSize {
+  DataSize live = 1;
+  DataSize gc = 2;
+}
+
+message Schema {
+  string id = 1;
+  string name = 2;
+  int32 version = 3;
+  string body = 4;
+  repeated Rule rules = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message TreeNodeRule {
+  string node_type = 1;
+  string content = 2;
+  string marks = 3;
+  string group = 4;
+}
+
+message Rule {
+  string path = 1;
+  string type = 2;
+  repeated TreeNodeRule tree_nodes = 3;
+}
+
+/////////////////////////////////////////
+// Messages for Revision               //
+/////////////////////////////////////////
+
+message RevisionSummary {
+  string id = 1;
+  string label = 2;
+  string description = 3;
+  string snapshot = 4;
+  google.protobuf.Timestamp created_at = 5;
+}

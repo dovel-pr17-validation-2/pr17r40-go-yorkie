@@ -1,0 +1,2793 @@
+openapi: 3.1.0
+info:
+  description: Yorkie is an open source document store for building collaborative
+    editing applications.
+  title: Yorkie
+  version: v0.7.25
+servers:
+- description: Production server
+  url: https://api.yorkie.dev
+- description: Local server
+  url: http://localhost:8080
+paths: {}
+components:
+  responses:
+    connect.error:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/connect.error'
+        application/proto:
+          schema:
+            $ref: '#/components/schemas/connect.error'
+      description: ""
+  schemas:
+    connect.error:
+      additionalProperties: false
+      description: 'Error type returned by Connect: https://connectrpc.com/docs/go/errors/#http-representation'
+      properties:
+        code:
+          enum:
+          - CodeCanceled
+          - CodeUnknown
+          - CodeInvalidArgument
+          - CodeDeadlineExceeded
+          - CodeNotFound
+          - CodeAlreadyExists
+          - CodePermissionDenied
+          - CodeResourceExhausted
+          - CodeFailedPrecondition
+          - CodeAborted
+          - CodeOutOfRange
+          - CodeInternal
+          - CodeUnavailable
+          - CodeDataLoss
+          - CodeUnauthenticated
+          examples:
+          - CodeNotFound
+          type: string
+        message:
+          type: string
+      title: Connect Error
+      type: object
+    google.protobuf.BoolValue:
+      additionalProperties: false
+      description: |-
+        Wrapper message for `bool`.
+
+         The JSON representation for `BoolValue` is JSON `true` and `false`.
+      properties:
+        value:
+          additionalProperties: false
+          description: The bool value.
+          title: value
+          type: boolean
+      title: BoolValue
+      type: object
+    google.protobuf.Int32Value:
+      additionalProperties: false
+      description: |-
+        Wrapper message for `int32`.
+
+         The JSON representation for `Int32Value` is JSON number.
+      properties:
+        value:
+          additionalProperties: false
+          description: The int32 value.
+          title: value
+          type: integer
+      title: Int32Value
+      type: object
+    google.protobuf.Int64Value:
+      additionalProperties: false
+      description: |-
+        Wrapper message for `int64`.
+
+         The JSON representation for `Int64Value` is JSON string.
+      properties:
+        value:
+          additionalProperties: false
+          description: The int64 value.
+          oneOf:
+          - type: string
+          - type: number
+          title: value
+      title: Int64Value
+      type: object
+    google.protobuf.StringValue:
+      additionalProperties: false
+      description: |-
+        Wrapper message for `string`.
+
+         The JSON representation for `StringValue` is JSON string.
+      properties:
+        value:
+          additionalProperties: false
+          description: The string value.
+          title: value
+          type: string
+      title: StringValue
+      type: object
+    google.protobuf.Timestamp:
+      additionalProperties: false
+      description: |-
+        A Timestamp represents a point in time independent of any time zone or local
+         calendar, encoded as a count of seconds and fractions of seconds at
+         nanosecond resolution. The count is relative to an epoch at UTC midnight on
+         January 1, 1970, in the proleptic Gregorian calendar which extends the
+         Gregorian calendar backwards to year one.
+
+         All minutes are 60 seconds long. Leap seconds are "smeared" so that no leap
+         second table is needed for interpretation, using a [24-hour linear
+         smear](https://developers.google.com/time/smear).
+
+         The range is from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59.999999999Z. By
+         restricting to that range, we ensure that we can convert to and from [RFC
+         3339](https://www.ietf.org/rfc/rfc3339.txt) date strings.
+
+         # Examples
+
+         Example 1: Compute Timestamp from POSIX `time()`.
+
+             Timestamp timestamp;
+             timestamp.set_seconds(time(NULL));
+             timestamp.set_nanos(0);
+
+         Example 2: Compute Timestamp from POSIX `gettimeofday()`.
+
+             struct timeval tv;
+             gettimeofday(&tv, NULL);
+
+             Timestamp timestamp;
+             timestamp.set_seconds(tv.tv_sec);
+             timestamp.set_nanos(tv.tv_usec * 1000);
+
+         Example 3: Compute Timestamp from Win32 `GetSystemTimeAsFileTime()`.
+
+             FILETIME ft;
+             GetSystemTimeAsFileTime(&ft);
+             UINT64 ticks = (((UINT64)ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+
+             // A Windows tick is 100 nanoseconds. Windows epoch 1601-01-01T00:00:00Z
+             // is 11644473600 seconds before Unix epoch 1970-01-01T00:00:00Z.
+             Timestamp timestamp;
+             timestamp.set_seconds((INT64) ((ticks / 10000000) - 11644473600LL));
+             timestamp.set_nanos((INT32) ((ticks % 10000000) * 100));
+
+         Example 4: Compute Timestamp from Java `System.currentTimeMillis()`.
+
+             long millis = System.currentTimeMillis();
+
+             Timestamp timestamp = Timestamp.newBuilder().setSeconds(millis / 1000)
+                 .setNanos((int) ((millis % 1000) * 1000000)).build();
+
+         Example 5: Compute Timestamp from Java `Instant.now()`.
+
+             Instant now = Instant.now();
+
+             Timestamp timestamp =
+                 Timestamp.newBuilder().setSeconds(now.getEpochSecond())
+                     .setNanos(now.getNano()).build();
+
+         Example 6: Compute Timestamp from current time in Python.
+
+             timestamp = Timestamp()
+             timestamp.GetCurrentTime()
+
+         # JSON Mapping
+
+         In JSON format, the Timestamp type is encoded as a string in the
+         [RFC 3339](https://www.ietf.org/rfc/rfc3339.txt) format. That is, the
+         format is "{year}-{month}-{day}T{hour}:{min}:{sec}[.{frac_sec}]Z"
+         where {year} is always expressed using four digits while {month}, {day},
+         {hour}, {min}, and {sec} are zero-padded to two digits each. The fractional
+         seconds, which can go up to 9 digits (i.e. up to 1 nanosecond resolution),
+         are optional. The "Z" suffix indicates the timezone ("UTC"); the timezone
+         is required. A proto3 JSON serializer should always use UTC (as indicated by
+         "Z") when printing the Timestamp type and a proto3 JSON parser should be
+         able to accept both UTC and other timezones (as indicated by an offset).
+
+         For example, "2017-01-15T01:30:15.01Z" encodes 15.01 seconds past
+         01:30 UTC on January 15, 2017.
+
+         In JavaScript, one can convert a Date object to this format using the
+         standard
+         [toISOString()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toISOString)
+         method. In Python, a standard `datetime.datetime` object can be converted
+         to this format using
+         [`strftime`](https://docs.python.org/2/library/time.html#time.strftime) with
+         the time format spec '%Y-%m-%dT%H:%M:%S.%fZ'. Likewise, in Java, one can use
+         the Joda Time's [`ISODateTimeFormat.dateTime()`](
+         http://joda-time.sourceforge.net/apidocs/org/joda/time/format/ISODateTimeFormat.html#dateTime()
+         ) to obtain a formatter capable of generating timestamps in this format.
+      format: date-time
+      type: string
+    google.protobuf.UInt64Value:
+      additionalProperties: false
+      description: |-
+        Wrapper message for `uint64`.
+
+         The JSON representation for `UInt64Value` is JSON string.
+      properties:
+        value:
+          additionalProperties: false
+          description: The uint64 value.
+          oneOf:
+          - type: string
+          - type: number
+          title: value
+      title: UInt64Value
+      type: object
+    yorkie.v1.Change:
+      additionalProperties: false
+      description: ""
+      properties:
+        id:
+          $ref: '#/components/schemas/yorkie.v1.ChangeID'
+          additionalProperties: false
+          description: ""
+          title: id
+          type: object
+        message:
+          additionalProperties: false
+          description: ""
+          title: message
+          type: string
+        operations:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.Operation'
+            type: object
+          title: operations
+          type: array
+        presenceChange:
+          $ref: '#/components/schemas/yorkie.v1.PresenceChange'
+          additionalProperties: false
+          description: ""
+          title: presence_change
+          type: object
+      title: Change
+      type: object
+    yorkie.v1.ChangeID:
+      additionalProperties: false
+      description: ""
+      properties:
+        actorId:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: actor_id
+          type: string
+        clientSeq:
+          additionalProperties: false
+          description: ""
+          title: client_seq
+          type: integer
+        lamport:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: lamport
+        serverSeq:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: server_seq
+        versionVector:
+          $ref: '#/components/schemas/yorkie.v1.VersionVector'
+          additionalProperties: false
+          description: ""
+          title: version_vector
+          type: object
+      title: ChangeID
+      type: object
+    yorkie.v1.ChangePack:
+      additionalProperties: false
+      description: |-
+        ChangePack is a message that contains all changes that occurred in a document.
+         It is used to synchronize changes between clients and servers.
+      properties:
+        capabilities:
+          additionalProperties: false
+          description: |-
+            capabilities is the negotiation channel for wire features a peer may not
+             understand. A server sets it on the pack it returns to advertise what it
+             supports; a client must treat absence as "unsupported" rather than as
+             "unknown", because a server that predates a feature cannot say so.
+
+             It exists because a server does not store the bytes a client sent: it
+             re-encodes from its own domain model, so a field it does not know is
+             dropped from the stored change log and the push still succeeds. Without a
+             handshake a client cannot tell that its restore was silently downgraded to
+             an ordinary insert. Measured against a pinned v0.7.20 server.
+          items:
+            type: string
+          title: capabilities
+          type: array
+        changes:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.Change'
+            type: object
+          title: changes
+          type: array
+        checkpoint:
+          $ref: '#/components/schemas/yorkie.v1.Checkpoint'
+          additionalProperties: false
+          description: ""
+          title: checkpoint
+          type: object
+        documentKey:
+          additionalProperties: false
+          description: ""
+          title: document_key
+          type: string
+        epoch:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: epoch
+        isRemoved:
+          additionalProperties: false
+          description: ""
+          title: is_removed
+          type: boolean
+        minSyncedTicket:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: |-
+            min_synced_ticket is superseded by version_vector and is written by no
+             SDK and read by no server. It stays declared rather than `reserved`
+             because the repository gates proto changes on buf's FILE category, whose
+             FIELD_NO_DELETE fires on a removed number even when it is reserved.
+          title: min_synced_ticket
+          type: object
+        snapshot:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: snapshot
+          type: string
+        versionVector:
+          $ref: '#/components/schemas/yorkie.v1.VersionVector'
+          additionalProperties: false
+          description: ""
+          title: version_vector
+          type: object
+      title: ChangePack
+      type: object
+    yorkie.v1.ChannelEvent:
+      additionalProperties: false
+      description: ""
+      properties:
+        payload:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: payload
+          type: string
+        publisher:
+          additionalProperties: false
+          description: ""
+          title: publisher
+          type: string
+        seq:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: seq
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: session_count
+        topic:
+          additionalProperties: false
+          description: ""
+          title: topic
+          type: string
+        type:
+          $ref: '#/components/schemas/yorkie.v1.ChannelEvent.Type'
+          additionalProperties: false
+          description: ""
+          title: type
+      title: ChannelEvent
+      type: object
+    yorkie.v1.ChannelEvent.Type:
+      description: ""
+      enum:
+      - - TYPE_UNSPECIFIED
+        - 0
+        - TYPE_PRESENCE
+        - 1
+        - TYPE_BROADCAST
+        - 2
+      title: Type
+      type: string
+    yorkie.v1.ChannelSummary:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        sessionCount:
+          additionalProperties: false
+          description: ""
+          title: session_count
+          type: integer
+      title: ChannelSummary
+      type: object
+    yorkie.v1.Checkpoint:
+      additionalProperties: false
+      description: ""
+      properties:
+        clientSeq:
+          additionalProperties: false
+          description: ""
+          title: client_seq
+          type: integer
+        serverSeq:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: server_seq
+      title: Checkpoint
+      type: object
+    yorkie.v1.DataSize:
+      additionalProperties: false
+      description: ""
+      properties:
+        data:
+          additionalProperties: false
+          description: ""
+          title: data
+          type: integer
+        meta:
+          additionalProperties: false
+          description: ""
+          title: meta
+          type: integer
+      title: DataSize
+      type: object
+    yorkie.v1.DocEvent:
+      additionalProperties: false
+      description: ""
+      properties:
+        body:
+          $ref: '#/components/schemas/yorkie.v1.DocEventBody'
+          additionalProperties: false
+          description: ""
+          title: body
+          type: object
+        publisher:
+          additionalProperties: false
+          description: ""
+          title: publisher
+          type: string
+        type:
+          $ref: '#/components/schemas/yorkie.v1.DocEventType'
+          additionalProperties: false
+          description: ""
+          title: type
+      title: DocEvent
+      type: object
+    yorkie.v1.DocEventBody:
+      additionalProperties: false
+      description: ""
+      properties:
+        payload:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: payload
+          type: string
+        topic:
+          additionalProperties: false
+          description: ""
+          title: topic
+          type: string
+      title: DocEventBody
+      type: object
+    yorkie.v1.DocEventType:
+      description: ""
+      enum:
+      - - DOC_EVENT_TYPE_DOCUMENT_CHANGED
+        - 0
+        - DOC_EVENT_TYPE_DOCUMENT_WATCHED
+        - 1
+        - DOC_EVENT_TYPE_DOCUMENT_UNWATCHED
+        - 2
+        - DOC_EVENT_TYPE_DOCUMENT_BROADCAST
+        - 3
+      title: DocEventType
+      type: string
+    yorkie.v1.DocSize:
+      additionalProperties: false
+      description: ""
+      properties:
+        gc:
+          $ref: '#/components/schemas/yorkie.v1.DataSize'
+          additionalProperties: false
+          description: ""
+          title: gc
+          type: object
+        live:
+          $ref: '#/components/schemas/yorkie.v1.DataSize'
+          additionalProperties: false
+          description: ""
+          title: live
+          type: object
+      title: DocSize
+      type: object
+    yorkie.v1.DocumentSummary:
+      additionalProperties: false
+      description: ""
+      properties:
+        accessedAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: accessed_at
+          type: object
+        attachedClients:
+          additionalProperties: false
+          description: ""
+          title: attached_clients
+          type: integer
+        createdAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        documentSize:
+          $ref: '#/components/schemas/yorkie.v1.DocSize'
+          additionalProperties: false
+          description: ""
+          title: document_size
+          type: object
+        id:
+          additionalProperties: false
+          description: ""
+          title: id
+          type: string
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        presences:
+          additionalProperties: false
+          description: ""
+          title: presences
+          type: object
+        root:
+          additionalProperties: false
+          description: ""
+          title: root
+          type: string
+        schemaKey:
+          additionalProperties: false
+          description: ""
+          title: schema_key
+          type: string
+        updatedAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: updated_at
+          type: object
+      title: DocumentSummary
+      type: object
+    yorkie.v1.DocumentSummary.PresencesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.Presence'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: PresencesEntry
+      type: object
+    yorkie.v1.JSONElement:
+      additionalProperties: false
+      description: ""
+      properties:
+        counter:
+          $ref: '#/components/schemas/yorkie.v1.JSONElement.Counter'
+          additionalProperties: false
+          description: ""
+          title: counter
+          type: object
+        jsonArray:
+          $ref: '#/components/schemas/yorkie.v1.JSONElement.JSONArray'
+          additionalProperties: false
+          description: ""
+          title: json_array
+          type: object
+        jsonObject:
+          $ref: '#/components/schemas/yorkie.v1.JSONElement.JSONObject'
+          additionalProperties: false
+          description: ""
+          title: json_object
+          type: object
+        primitive:
+          $ref: '#/components/schemas/yorkie.v1.JSONElement.Primitive'
+          additionalProperties: false
+          description: ""
+          title: primitive
+          type: object
+        text:
+          $ref: '#/components/schemas/yorkie.v1.JSONElement.Text'
+          additionalProperties: false
+          description: ""
+          title: text
+          type: object
+        tree:
+          $ref: '#/components/schemas/yorkie.v1.JSONElement.Tree'
+          additionalProperties: false
+          description: ""
+          title: tree
+          type: object
+      title: JSONElement
+      type: object
+    yorkie.v1.JSONElement.Counter:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        hllRegisters:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: hll_registers
+          type: string
+        movedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: moved_at
+          type: object
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        revivedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: revived_at
+          type: object
+        type:
+          $ref: '#/components/schemas/yorkie.v1.ValueType'
+          additionalProperties: false
+          description: ""
+          title: type
+        value:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: value
+          type: string
+      title: Counter
+      type: object
+    yorkie.v1.JSONElement.JSONArray:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        movedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: moved_at
+          type: object
+        nodes:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.RGANode'
+            type: object
+          title: nodes
+          type: array
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        revivedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: revived_at
+          type: object
+      title: JSONArray
+      type: object
+    yorkie.v1.JSONElement.JSONObject:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        movedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: moved_at
+          type: object
+        nodes:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.RHTNode'
+            type: object
+          title: nodes
+          type: array
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        revivedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: |-
+            revived_at is the revive half of the liveness register. See the comment
+             on RestoreMode for why an element needs one.
+          title: revived_at
+          type: object
+      title: JSONObject
+      type: object
+    yorkie.v1.JSONElement.Primitive:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        movedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: moved_at
+          type: object
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        revivedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: revived_at
+          type: object
+        type:
+          $ref: '#/components/schemas/yorkie.v1.ValueType'
+          additionalProperties: false
+          description: ""
+          title: type
+        value:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: value
+          type: string
+      title: Primitive
+      type: object
+    yorkie.v1.JSONElement.Text:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        movedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: moved_at
+          type: object
+        nodes:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TextNode'
+            type: object
+          title: nodes
+          type: array
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        revivedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: revived_at
+          type: object
+      title: Text
+      type: object
+    yorkie.v1.JSONElement.Tree:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        movedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: moved_at
+          type: object
+        nodes:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeNode'
+            type: object
+          title: nodes
+          type: array
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        revivedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: revived_at
+          type: object
+      title: Tree
+      type: object
+    yorkie.v1.JSONElementSimple:
+      additionalProperties: false
+      description: |-
+        JSONElementSimple is the value an operation carries: the element's identity
+         plus its encoded contents. Its moved_at and removed_at carry no lifecycle
+         state -- nothing ever wrote them, because an element reaching a replica
+         inside an operation has neither moved nor been removed yet. The snapshot
+         form, JSONElement, is where both are actually populated.
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        movedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: |-
+            Never written. See the message comment; deprecated rather than reserved
+             for the reason given on ChangePack.min_synced_ticket.
+          title: moved_at
+          type: object
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        type:
+          $ref: '#/components/schemas/yorkie.v1.ValueType'
+          additionalProperties: false
+          description: ""
+          title: type
+        value:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: value
+          type: string
+      title: JSONElementSimple
+      type: object
+    yorkie.v1.Member:
+      additionalProperties: false
+      description: ""
+      properties:
+        id:
+          additionalProperties: false
+          description: ""
+          title: id
+          type: string
+        invitedAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: invited_at
+          type: object
+        projectId:
+          additionalProperties: false
+          description: ""
+          title: project_id
+          type: string
+        role:
+          additionalProperties: false
+          description: ""
+          title: role
+          type: string
+        userId:
+          additionalProperties: false
+          description: ""
+          title: user_id
+          type: string
+        username:
+          additionalProperties: false
+          description: ""
+          title: username
+          type: string
+      title: Member
+      type: object
+    yorkie.v1.MetricPoint:
+      additionalProperties: false
+      description: ""
+      properties:
+        timestamp:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: timestamp
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: integer
+      title: MetricPoint
+      type: object
+    yorkie.v1.NodeAttr:
+      additionalProperties: false
+      description: ""
+      properties:
+        isRemoved:
+          additionalProperties: false
+          description: ""
+          title: is_removed
+          type: boolean
+        updatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: updated_at
+          type: object
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: NodeAttr
+      type: object
+    yorkie.v1.Operation:
+      additionalProperties: false
+      description: ""
+      properties:
+        add:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Add'
+          additionalProperties: false
+          description: ""
+          title: add
+          type: object
+        arraySet:
+          $ref: '#/components/schemas/yorkie.v1.Operation.ArraySet'
+          additionalProperties: false
+          description: ""
+          title: array_set
+          type: object
+        edit:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Edit'
+          additionalProperties: false
+          description: ""
+          title: edit
+          type: object
+        increase:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Increase'
+          additionalProperties: false
+          description: ""
+          title: increase
+          type: object
+        move:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Move'
+          additionalProperties: false
+          description: ""
+          title: move
+          type: object
+        remove:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Remove'
+          additionalProperties: false
+          description: ""
+          title: remove
+          type: object
+        set:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Set'
+          additionalProperties: false
+          description: ""
+          title: set
+          type: object
+        style:
+          $ref: '#/components/schemas/yorkie.v1.Operation.Style'
+          additionalProperties: false
+          description: ""
+          title: style
+          type: object
+        treeEdit:
+          $ref: '#/components/schemas/yorkie.v1.Operation.TreeEdit'
+          additionalProperties: false
+          description: ""
+          title: tree_edit
+          type: object
+        treeStyle:
+          $ref: '#/components/schemas/yorkie.v1.Operation.TreeStyle'
+          additionalProperties: false
+          description: ""
+          title: tree_style
+          type: object
+      title: Operation
+      type: object
+    yorkie.v1.Operation.Add:
+      additionalProperties: false
+      description: ""
+      properties:
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        prevCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: prev_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        value:
+          $ref: '#/components/schemas/yorkie.v1.JSONElementSimple'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: Add
+      type: object
+    yorkie.v1.Operation.ArraySet:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        value:
+          $ref: '#/components/schemas/yorkie.v1.JSONElementSimple'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: ArraySet
+      type: object
+    yorkie.v1.Operation.Edit:
+      additionalProperties: false
+      description: ""
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        content:
+          additionalProperties: false
+          description: ""
+          title: content
+          type: string
+        createdAtMapByActor:
+          additionalProperties: false
+          description: |-
+            created_at_map_by_actor is superseded by the change's version vector and
+             is written by no SDK. See ChangePack.min_synced_ticket for why it is
+             deprecated rather than reserved.
+          title: created_at_map_by_actor
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        from:
+          $ref: '#/components/schemas/yorkie.v1.TextNodePos'
+          additionalProperties: false
+          description: ""
+          title: from
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        restoreSpans:
+          additionalProperties: false
+          description: identity-preserving undo/redo
+          items:
+            $ref: '#/components/schemas/yorkie.v1.RestoreSpan'
+            type: object
+          title: restore_spans
+          type: array
+        retombstoneSpans:
+          additionalProperties: false
+          description: |-
+            retombstone_spans is the companion span set for an identity-preserving
+             reverse op: restore_spans is content the reversed edit removed (to
+             revive), retombstone_spans is content it inserted (to re-remove). Both
+             are addressed by original identity so a revived neighbour keeps its
+             relative order across chained undo/redo. restore_mode selects direction.
+          items:
+            $ref: '#/components/schemas/yorkie.v1.RestoreSpan'
+            type: object
+          title: retombstone_spans
+          type: array
+        to:
+          $ref: '#/components/schemas/yorkie.v1.TextNodePos'
+          additionalProperties: false
+          description: ""
+          title: to
+          type: object
+      title: Edit
+      type: object
+    yorkie.v1.Operation.Edit.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: AttributesEntry
+      type: object
+    yorkie.v1.Operation.Edit.CreatedAtMapByActorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: CreatedAtMapByActorEntry
+      type: object
+    yorkie.v1.Operation.Increase:
+      additionalProperties: false
+      description: ""
+      properties:
+        actor:
+          additionalProperties: false
+          description: ""
+          title: actor
+          type: string
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        value:
+          $ref: '#/components/schemas/yorkie.v1.JSONElementSimple'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: Increase
+      type: object
+    yorkie.v1.Operation.Move:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        prevCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: prev_created_at
+          type: object
+      title: Move
+      type: object
+    yorkie.v1.Operation.Remove:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+      title: Remove
+      type: object
+    yorkie.v1.Operation.Set:
+      additionalProperties: false
+      description: ""
+      properties:
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        value:
+          $ref: '#/components/schemas/yorkie.v1.JSONElementSimple'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: Set
+      type: object
+    yorkie.v1.Operation.Style:
+      additionalProperties: false
+      description: ""
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        attributesToRemove:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: attributes_to_remove
+          type: array
+        createdAtMapByActor:
+          additionalProperties: false
+          description: Deprecated for the same reason as Edit.created_at_map_by_actor.
+          title: created_at_map_by_actor
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        from:
+          $ref: '#/components/schemas/yorkie.v1.TextNodePos'
+          additionalProperties: false
+          description: ""
+          title: from
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        to:
+          $ref: '#/components/schemas/yorkie.v1.TextNodePos'
+          additionalProperties: false
+          description: ""
+          title: to
+          type: object
+      title: Style
+      type: object
+    yorkie.v1.Operation.Style.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: AttributesEntry
+      type: object
+    yorkie.v1.Operation.Style.CreatedAtMapByActorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: CreatedAtMapByActorEntry
+      type: object
+    yorkie.v1.Operation.TreeEdit:
+      additionalProperties: false
+      description: ""
+      properties:
+        contents:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeNodes'
+            type: object
+          title: contents
+          type: array
+        createdAtMapByActor:
+          additionalProperties: false
+          description: Deprecated for the same reason as Edit.created_at_map_by_actor.
+          title: created_at_map_by_actor
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        from:
+          $ref: '#/components/schemas/yorkie.v1.TreePos'
+          additionalProperties: false
+          description: ""
+          title: from
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        restoreMode:
+          $ref: '#/components/schemas/yorkie.v1.RestoreMode'
+          additionalProperties: false
+          description: ""
+          title: restore_mode
+        restoreSpans:
+          additionalProperties: false
+          description: identity-preserving undo/redo
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeRestoreSpan'
+            type: object
+          title: restore_spans
+          type: array
+        retombstoneSpans:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeRestoreSpan'
+            type: object
+          title: retombstone_spans
+          type: array
+        splitLevel:
+          additionalProperties: false
+          description: ""
+          title: split_level
+          type: integer
+        splitTickets:
+          additionalProperties: false
+          description: |-
+            split_tickets carries the tickets the originating replica issued for the
+             nodes an element split creates, in issue order. Empty for a change
+             written before this field existed, which replays through the simulation
+             that reconstructed them from executed_at and the content count.
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+            type: object
+          title: split_tickets
+          type: array
+        to:
+          $ref: '#/components/schemas/yorkie.v1.TreePos'
+          additionalProperties: false
+          description: ""
+          title: to
+          type: object
+      title: TreeEdit
+      type: object
+    yorkie.v1.Operation.TreeEdit.CreatedAtMapByActorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: CreatedAtMapByActorEntry
+      type: object
+    yorkie.v1.Operation.TreeStyle:
+      additionalProperties: false
+      description: ""
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        attributesToRemove:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: attributes_to_remove
+          type: array
+        createdAtMapByActor:
+          additionalProperties: false
+          description: Deprecated for the same reason as Edit.created_at_map_by_actor.
+          title: created_at_map_by_actor
+          type: object
+        executedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: executed_at
+          type: object
+        from:
+          $ref: '#/components/schemas/yorkie.v1.TreePos'
+          additionalProperties: false
+          description: ""
+          title: from
+          type: object
+        parentCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: parent_created_at
+          type: object
+        to:
+          $ref: '#/components/schemas/yorkie.v1.TreePos'
+          additionalProperties: false
+          description: ""
+          title: to
+          type: object
+      title: TreeStyle
+      type: object
+    yorkie.v1.Operation.TreeStyle.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: AttributesEntry
+      type: object
+    yorkie.v1.Operation.TreeStyle.CreatedAtMapByActorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: CreatedAtMapByActorEntry
+      type: object
+    yorkie.v1.Presence:
+      additionalProperties: false
+      description: ""
+      properties:
+        data:
+          additionalProperties: false
+          description: ""
+          title: data
+          type: object
+      title: Presence
+      type: object
+    yorkie.v1.Presence.DataEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: DataEntry
+      type: object
+    yorkie.v1.PresenceChange:
+      additionalProperties: false
+      description: ""
+      properties:
+        presence:
+          $ref: '#/components/schemas/yorkie.v1.Presence'
+          additionalProperties: false
+          description: ""
+          title: presence
+          type: object
+        removedKeys:
+          additionalProperties: false
+          description: |-
+            removed_keys lists the top-level keys a CHANGE_TYPE_PATCH deletes. Unused
+             by the other change types.
+          items:
+            type: string
+          title: removed_keys
+          type: array
+        type:
+          $ref: '#/components/schemas/yorkie.v1.PresenceChange.ChangeType'
+          additionalProperties: false
+          description: ""
+          title: type
+      title: PresenceChange
+      type: object
+    yorkie.v1.PresenceChange.ChangeType:
+      description: ""
+      enum:
+      - - CHANGE_TYPE_UNSPECIFIED
+        - 0
+        - CHANGE_TYPE_PUT
+        - 1
+        - CHANGE_TYPE_DELETE
+        - 2
+        - CHANGE_TYPE_CLEAR
+        - 3
+        - CHANGE_TYPE_PATCH
+        - 4
+      title: ChangeType
+      type: string
+    yorkie.v1.Project:
+      additionalProperties: false
+      description: ""
+      properties:
+        allowedOrigins:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: allowed_origins
+          type: array
+        authWebhookMaxRetries:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: auth_webhook_max_retries
+        authWebhookMaxWaitInterval:
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_max_wait_interval
+          type: string
+        authWebhookMethods:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: auth_webhook_methods
+          type: array
+        authWebhookMinWaitInterval:
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_min_wait_interval
+          type: string
+        authWebhookRequestTimeout:
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_request_timeout
+          type: string
+        authWebhookUrl:
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_url
+          type: string
+        autoRevisionEnabled:
+          additionalProperties: false
+          description: ""
+          title: auto_revision_enabled
+          type: boolean
+        channelSessionTtl:
+          additionalProperties: false
+          description: ""
+          title: channel_session_ttl
+          type: string
+        clientDeactivateThreshold:
+          additionalProperties: false
+          description: ""
+          title: client_deactivate_threshold
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        eventWebhookEvents:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: event_webhook_events
+          type: array
+        eventWebhookMaxRetries:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: event_webhook_max_retries
+        eventWebhookMaxWaitInterval:
+          additionalProperties: false
+          description: ""
+          title: event_webhook_max_wait_interval
+          type: string
+        eventWebhookMinWaitInterval:
+          additionalProperties: false
+          description: ""
+          title: event_webhook_min_wait_interval
+          type: string
+        eventWebhookRequestTimeout:
+          additionalProperties: false
+          description: ""
+          title: event_webhook_request_timeout
+          type: string
+        eventWebhookUrl:
+          additionalProperties: false
+          description: ""
+          title: event_webhook_url
+          type: string
+        id:
+          additionalProperties: false
+          description: ""
+          title: id
+          type: string
+        maxAttachmentsPerDocument:
+          additionalProperties: false
+          description: ""
+          title: max_attachments_per_document
+          type: integer
+        maxSizePerDocument:
+          additionalProperties: false
+          description: ""
+          title: max_size_per_document
+          type: integer
+        maxSubscribersPerDocument:
+          additionalProperties: false
+          description: ""
+          title: max_subscribers_per_document
+          type: integer
+        name:
+          additionalProperties: false
+          description: ""
+          title: name
+          type: string
+        publicKey:
+          additionalProperties: false
+          description: ""
+          title: public_key
+          type: string
+        removeOnDetach:
+          additionalProperties: false
+          description: ""
+          title: remove_on_detach
+          type: boolean
+        secretKey:
+          additionalProperties: false
+          description: ""
+          title: secret_key
+          type: string
+        snapshotInterval:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: snapshot_interval
+        snapshotThreshold:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: snapshot_threshold
+        updatedAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: updated_at
+          type: object
+      title: Project
+      type: object
+    yorkie.v1.RGANode:
+      additionalProperties: false
+      description: |-
+        RGANode is one position slot of an array, serialized as a flat repeated
+         field by its container rather than as a linked list. The recursive `next`
+         is a leftover of the linked-list form: nothing writes it, and because it
+         stays declared, a server unmarshalling element bytes is still obliged to be
+         ready to parse a chain as deep as the array is long.
+      properties:
+        element:
+          $ref: '#/components/schemas/yorkie.v1.JSONElement'
+          additionalProperties: false
+          description: ""
+          title: element
+          type: object
+        next:
+          $ref: '#/components/schemas/yorkie.v1.RGANode'
+          additionalProperties: false
+          description: |-
+            Never written; the container's flat `nodes` carries the order instead.
+             Deprecated rather than reserved for the reason given on
+             ChangePack.min_synced_ticket.
+          title: next
+          type: object
+        positionCreatedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: position_created_at
+          type: object
+        positionMovedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: position_moved_at
+          type: object
+        positionRemovedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: position_removed_at
+          type: object
+      title: RGANode
+      type: object
+    yorkie.v1.RHTNode:
+      additionalProperties: false
+      description: ""
+      properties:
+        element:
+          $ref: '#/components/schemas/yorkie.v1.JSONElement'
+          additionalProperties: false
+          description: ""
+          title: element
+          type: object
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+      title: RHTNode
+      type: object
+    yorkie.v1.RestoreMode:
+      description: |-
+        RestoreMode selects the identity-preserving path. RESTORE_MODE_UNSPECIFIED
+         means an ordinary edit (no restore semantics), keeping forward edits
+         unchanged on the wire.
+
+         For elements it selects between reviving the element already in the tree and
+         inserting a copy of it. The copy is what undo does today, and because a
+         deep copy keeps every descendant's created_at, it puts a second live element
+         under ids the document is indexed by. Reviving needs a replicated liveness
+         register -- removed_at paired with revived_at on each element -- so that
+         every replica resolves a remove/revive race the same way, with a tie going
+         to the removal as the shipped remove register already does.
+
+         The branch cannot be chosen from local state. A replica that collected
+         between the removal and the undo has purged the tombstone, and one that
+         joined from a later snapshot never had it, so "revive if a tombstone is
+         present" is a function of local collection timing and the same change log
+         would produce different documents. That is why the branch is on the wire.
+      enum:
+      - - RESTORE_MODE_UNSPECIFIED
+        - 0
+        - RESTORE_MODE_RESTORE
+        - 1
+        - RESTORE_MODE_RETOMBSTONE
+        - 2
+      title: RestoreMode
+      type: string
+    yorkie.v1.RestoreSpan:
+      additionalProperties: false
+      description: |-
+        RestoreSpan carries a run of characters from a single original text
+         insertion, addressed by split-invariant absolute offsets [start, end),
+         for identity-preserving undo/redo. content and attributes are a deep
+         copy of the removed value so restore is independent of GC state.
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        content:
+          additionalProperties: false
+          description: ""
+          title: content
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        end:
+          additionalProperties: false
+          description: ""
+          title: end
+          type: integer
+        start:
+          additionalProperties: false
+          description: ""
+          title: start
+          type: integer
+      title: RestoreSpan
+      type: object
+    yorkie.v1.RestoreSpan.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: AttributesEntry
+      type: object
+    yorkie.v1.RevisionSummary:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        description:
+          additionalProperties: false
+          description: ""
+          title: description
+          type: string
+        id:
+          additionalProperties: false
+          description: ""
+          title: id
+          type: string
+        label:
+          additionalProperties: false
+          description: ""
+          title: label
+          type: string
+        snapshot:
+          additionalProperties: false
+          description: ""
+          title: snapshot
+          type: string
+      title: RevisionSummary
+      type: object
+    yorkie.v1.Rule:
+      additionalProperties: false
+      description: ""
+      properties:
+        path:
+          additionalProperties: false
+          description: ""
+          title: path
+          type: string
+        treeNodes:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeNodeRule'
+            type: object
+          title: tree_nodes
+          type: array
+        type:
+          additionalProperties: false
+          description: ""
+          title: type
+          type: string
+      title: Rule
+      type: object
+    yorkie.v1.Schema:
+      additionalProperties: false
+      description: ""
+      properties:
+        body:
+          additionalProperties: false
+          description: ""
+          title: body
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        id:
+          additionalProperties: false
+          description: ""
+          title: id
+          type: string
+        name:
+          additionalProperties: false
+          description: ""
+          title: name
+          type: string
+        rules:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.Rule'
+            type: object
+          title: rules
+          type: array
+        version:
+          additionalProperties: false
+          description: ""
+          title: version
+          type: integer
+      title: Schema
+      type: object
+    yorkie.v1.Snapshot:
+      additionalProperties: false
+      description: |-
+        ///////////////////////////////////////
+         Messages for Snapshot               //
+        ///////////////////////////////////////
+      properties:
+        presences:
+          additionalProperties: false
+          description: ""
+          title: presences
+          type: object
+        root:
+          $ref: '#/components/schemas/yorkie.v1.JSONElement'
+          additionalProperties: false
+          description: ""
+          title: root
+          type: object
+      title: Snapshot
+      type: object
+    yorkie.v1.Snapshot.PresencesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.Presence'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: PresencesEntry
+      type: object
+    yorkie.v1.TextNode:
+      additionalProperties: false
+      description: ""
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        id:
+          $ref: '#/components/schemas/yorkie.v1.TextNodeID'
+          additionalProperties: false
+          description: ""
+          title: id
+          type: object
+        insPrevId:
+          $ref: '#/components/schemas/yorkie.v1.TextNodeID'
+          additionalProperties: false
+          description: ""
+          title: ins_prev_id
+          type: object
+        removalEvents:
+          additionalProperties: false
+          description: |-
+            removal_events is the removal ledger beyond removed_at: every removal of
+             this node and every undo that cancelled one, except removed_at itself.
+             An actor's events alternate in ticket order, a removal then the undo
+             cancelling it, so each is told apart by its place. Empty when removed_at
+             says it all. A piece recreated after GC records a stand-in removal by the
+             undoing actor at lamport 0, then its cancel. The pairing relies on an
+             undo cancelling only its own actor's removal; a change to that rule needs
+             a new field, not a new reading of this one.
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+            type: object
+          title: removal_events
+          type: array
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: TextNode
+      type: object
+    yorkie.v1.TextNode.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.NodeAttr'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: AttributesEntry
+      type: object
+    yorkie.v1.TextNodeID:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        offset:
+          additionalProperties: false
+          description: ""
+          title: offset
+          type: integer
+      title: TextNodeID
+      type: object
+    yorkie.v1.TextNodePos:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        offset:
+          additionalProperties: false
+          description: ""
+          title: offset
+          type: integer
+        relativeOffset:
+          additionalProperties: false
+          description: ""
+          title: relative_offset
+          type: integer
+      title: TextNodePos
+      type: object
+    yorkie.v1.TimeTicket:
+      additionalProperties: false
+      description: ""
+      properties:
+        actorId:
+          additionalProperties: false
+          description: ""
+          format: byte
+          title: actor_id
+          type: string
+        delimiter:
+          additionalProperties: false
+          description: ""
+          title: delimiter
+          type: integer
+        lamport:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: lamport
+      title: TimeTicket
+      type: object
+    yorkie.v1.TreeNode:
+      additionalProperties: false
+      description: ""
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        depth:
+          additionalProperties: false
+          description: ""
+          title: depth
+          type: integer
+        id:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: id
+          type: object
+        insNextId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: ins_next_id
+          type: object
+        insPrevId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: ins_prev_id
+          type: object
+        mergedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: |-
+            merged_at records the immutable ticket of the merge operation.
+             Stored alongside merged_from because the source parent's removed_at
+             may be overwritten by later LWW tombstones and thus cannot serve as
+             the merge-time causal boundary for SplitElement. See
+             docs/design/concurrent-merge-split.md for details.
+          title: merged_at
+          type: object
+        mergedFrom:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: |-
+            merged_from is set when this node was moved to a new parent by a
+             concurrent merge. It points to the source parent's ID.
+          title: merged_from
+          type: object
+        removedAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: removed_at
+          type: object
+        type:
+          additionalProperties: false
+          description: ""
+          title: type
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: TreeNode
+      type: object
+    yorkie.v1.TreeNode.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.NodeAttr'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: AttributesEntry
+      type: object
+    yorkie.v1.TreeNodeID:
+      additionalProperties: false
+      description: ""
+      properties:
+        createdAt:
+          $ref: '#/components/schemas/yorkie.v1.TimeTicket'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        offset:
+          additionalProperties: false
+          description: ""
+          title: offset
+          type: integer
+      title: TreeNodeID
+      type: object
+    yorkie.v1.TreeNodeRule:
+      additionalProperties: false
+      description: ""
+      properties:
+        content:
+          additionalProperties: false
+          description: ""
+          title: content
+          type: string
+        group:
+          additionalProperties: false
+          description: ""
+          title: group
+          type: string
+        marks:
+          additionalProperties: false
+          description: ""
+          title: marks
+          type: string
+        nodeType:
+          additionalProperties: false
+          description: ""
+          title: node_type
+          type: string
+      title: TreeNodeRule
+      type: object
+    yorkie.v1.TreeNodes:
+      additionalProperties: false
+      description: ""
+      properties:
+        content:
+          additionalProperties: false
+          description: ""
+          items:
+            $ref: '#/components/schemas/yorkie.v1.TreeNode'
+            type: object
+          title: content
+          type: array
+      title: TreeNodes
+      type: object
+    yorkie.v1.TreePos:
+      additionalProperties: false
+      description: ""
+      properties:
+        leftSiblingId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: left_sibling_id
+          type: object
+        parentId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: parent_id
+          type: object
+      title: TreePos
+      type: object
+    yorkie.v1.TreeRestoreSpan:
+      additionalProperties: false
+      description: |-
+        TreeRestoreSpan carries a tree node run from a single deletion, addressed
+         by TreeNodeID identity, for identity-preserving Tree undo/redo. Unlike the
+         text RestoreSpan (flat offsets), a tree span records the node's structure
+         (type/attrs) and its position anchors, because in a tree id-order is not
+         sibling-order: left_sibling_id and right_sibling_id are redundant external
+         boundary anchors of the deleted run, so restore can reconstruct the run's
+         internal order from the op's own spans and needs only one surviving
+         boundary to place it. value/attributes are a deep copy so a GC-purged node
+         can be recreated.
+      properties:
+        attributes:
+          additionalProperties: false
+          description: ""
+          title: attributes
+          type: object
+        id:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: id
+          type: object
+        isText:
+          additionalProperties: false
+          description: ""
+          title: is_text
+          type: boolean
+        leftSiblingId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: left_sibling_id
+          type: object
+        length:
+          additionalProperties: false
+          description: ""
+          title: length
+          type: integer
+        nodeType:
+          additionalProperties: false
+          description: ""
+          title: node_type
+          type: string
+        parentId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: parent_id
+          type: object
+        rightSiblingId:
+          $ref: '#/components/schemas/yorkie.v1.TreeNodeID'
+          additionalProperties: false
+          description: ""
+          title: right_sibling_id
+          type: object
+        value:
+          additionalProperties: false
+          description: ""
+          title: value
+          type: string
+      title: TreeRestoreSpan
+      type: object
+    yorkie.v1.TreeRestoreSpan.AttributesEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          $ref: '#/components/schemas/yorkie.v1.NodeAttr'
+          additionalProperties: false
+          description: ""
+          title: value
+          type: object
+      title: AttributesEntry
+      type: object
+    yorkie.v1.UpdatableProjectFields:
+      additionalProperties: false
+      description: ""
+      properties:
+        allowedOrigins:
+          $ref: '#/components/schemas/yorkie.v1.UpdatableProjectFields.AllowedOrigins'
+          additionalProperties: false
+          description: ""
+          title: allowed_origins
+          type: object
+        authWebhookMaxRetries:
+          $ref: '#/components/schemas/google.protobuf.UInt64Value'
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_max_retries
+          type: object
+        authWebhookMaxWaitInterval:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_max_wait_interval
+          type: object
+        authWebhookMethods:
+          $ref: '#/components/schemas/yorkie.v1.UpdatableProjectFields.AuthWebhookMethods'
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_methods
+          type: object
+        authWebhookMinWaitInterval:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_min_wait_interval
+          type: object
+        authWebhookRequestTimeout:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_request_timeout
+          type: object
+        authWebhookUrl:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: auth_webhook_url
+          type: object
+        autoRevisionEnabled:
+          $ref: '#/components/schemas/google.protobuf.BoolValue'
+          additionalProperties: false
+          description: ""
+          title: auto_revision_enabled
+          type: object
+        channelSessionTtl:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: channel_session_ttl
+          type: object
+        clientDeactivateThreshold:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: client_deactivate_threshold
+          type: object
+        eventWebhookEvents:
+          $ref: '#/components/schemas/yorkie.v1.UpdatableProjectFields.EventWebhookEvents'
+          additionalProperties: false
+          description: ""
+          title: event_webhook_events
+          type: object
+        eventWebhookMaxRetries:
+          $ref: '#/components/schemas/google.protobuf.UInt64Value'
+          additionalProperties: false
+          description: ""
+          title: event_webhook_max_retries
+          type: object
+        eventWebhookMaxWaitInterval:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: event_webhook_max_wait_interval
+          type: object
+        eventWebhookMinWaitInterval:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: event_webhook_min_wait_interval
+          type: object
+        eventWebhookRequestTimeout:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: event_webhook_request_timeout
+          type: object
+        eventWebhookUrl:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: event_webhook_url
+          type: object
+        maxAttachmentsPerDocument:
+          $ref: '#/components/schemas/google.protobuf.Int32Value'
+          additionalProperties: false
+          description: ""
+          title: max_attachments_per_document
+          type: object
+        maxSizePerDocument:
+          $ref: '#/components/schemas/google.protobuf.Int32Value'
+          additionalProperties: false
+          description: ""
+          title: max_size_per_document
+          type: object
+        maxSubscribersPerDocument:
+          $ref: '#/components/schemas/google.protobuf.Int32Value'
+          additionalProperties: false
+          description: ""
+          title: max_subscribers_per_document
+          type: object
+        name:
+          $ref: '#/components/schemas/google.protobuf.StringValue'
+          additionalProperties: false
+          description: ""
+          title: name
+          type: object
+        removeOnDetach:
+          $ref: '#/components/schemas/google.protobuf.BoolValue'
+          additionalProperties: false
+          description: ""
+          title: remove_on_detach
+          type: object
+        snapshotInterval:
+          $ref: '#/components/schemas/google.protobuf.Int64Value'
+          additionalProperties: false
+          description: ""
+          title: snapshot_interval
+          type: object
+        snapshotThreshold:
+          $ref: '#/components/schemas/google.protobuf.Int64Value'
+          additionalProperties: false
+          description: ""
+          title: snapshot_threshold
+          type: object
+      title: UpdatableProjectFields
+      type: object
+    yorkie.v1.UpdatableProjectFields.AllowedOrigins:
+      additionalProperties: false
+      description: ""
+      properties:
+        origins:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: origins
+          type: array
+      title: AllowedOrigins
+      type: object
+    yorkie.v1.UpdatableProjectFields.AuthWebhookMethods:
+      additionalProperties: false
+      description: ""
+      properties:
+        methods:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: methods
+          type: array
+      title: AuthWebhookMethods
+      type: object
+    yorkie.v1.UpdatableProjectFields.EventWebhookEvents:
+      additionalProperties: false
+      description: ""
+      properties:
+        events:
+          additionalProperties: false
+          description: ""
+          items:
+            type: string
+          title: events
+          type: array
+      title: EventWebhookEvents
+      type: object
+    yorkie.v1.User:
+      additionalProperties: false
+      description: ""
+      properties:
+        authProvider:
+          additionalProperties: false
+          description: ""
+          title: auth_provider
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          additionalProperties: false
+          description: ""
+          title: created_at
+          type: object
+        id:
+          additionalProperties: false
+          description: ""
+          title: id
+          type: string
+        username:
+          additionalProperties: false
+          description: ""
+          title: username
+          type: string
+      title: User
+      type: object
+    yorkie.v1.ValueType:
+      description: ""
+      enum:
+      - - VALUE_TYPE_NULL
+        - 0
+        - VALUE_TYPE_BOOLEAN
+        - 1
+        - VALUE_TYPE_INTEGER
+        - 2
+        - VALUE_TYPE_LONG
+        - 3
+        - VALUE_TYPE_DOUBLE
+        - 4
+        - VALUE_TYPE_STRING
+        - 5
+        - VALUE_TYPE_BYTES
+        - 6
+        - VALUE_TYPE_DATE
+        - 7
+        - VALUE_TYPE_JSON_OBJECT
+        - 8
+        - VALUE_TYPE_JSON_ARRAY
+        - 9
+        - VALUE_TYPE_TEXT
+        - 10
+        - VALUE_TYPE_INTEGER_CNT
+        - 11
+        - VALUE_TYPE_LONG_CNT
+        - 12
+        - VALUE_TYPE_TREE
+        - 13
+        - VALUE_TYPE_INTEGER_DEDUP_CNT
+        - 14
+      title: ValueType
+      type: string
+    yorkie.v1.VersionVector:
+      additionalProperties: false
+      description: ""
+      properties:
+        vector:
+          additionalProperties: false
+          description: ""
+          title: vector
+          type: object
+      title: VersionVector
+      type: object
+    yorkie.v1.VersionVector.VectorEntry:
+      additionalProperties: false
+      description: ""
+      properties:
+        key:
+          additionalProperties: false
+          description: ""
+          title: key
+          type: string
+        value:
+          additionalProperties: false
+          description: ""
+          oneOf:
+          - type: string
+          - type: number
+          title: value
+      title: VectorEntry
+      type: object
+  securitySchemes:
+    ApiKeyAuth:
+      in: header
+      name: Authorization
+      type: apiKey
+security:
+- ApiKeyAuth: []

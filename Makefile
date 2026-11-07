@@ -1,0 +1,160 @@
+YORKIE_VERSION := 0.7.25
+
+GO_PROJECT = github.com/yorkie-team/yorkie
+
+ifeq ($(OS),Windows_NT)
+    BUILD_DATE := $(shell echo %date:~6,4%-%date:~0,2%-%date:~3,2%)
+    GO_SRC := $(shell dir /s /b *.go | findstr /v "vendor")
+    EXECUTABLE = ./bin/yorkie.exe
+else
+    BUILD_DATE := $(shell date "+%Y-%m-%d")
+    GO_SRC := $(shell find . -path ./vendor -prune -o -type f -name '*.go' -print)
+    EXECUTABLE = ./bin/yorkie
+endif
+
+# inject the version number into the golang version package using the -X linker flag
+GO_LDFLAGS ?=
+GO_LDFLAGS += -X ${GO_PROJECT}/internal/version.Version=${YORKIE_VERSION}
+GO_LDFLAGS += -X ${GO_PROJECT}/internal/version.BuildDate=${BUILD_DATE}
+
+# Run every Go command, and golangci-lint, under the Go minor go.mod names
+# when the local Go is a newer minor. GOTOOLCHAIN=auto never downgrades, and
+# a newer minor breaks the gate: golangci-lint cannot read its export data, and
+# its go fix has modernizers CI's toolchain lacks. Same or older local Go, or a
+# GOTOOLCHAIN set by the caller (environment, make argument or `go env -w`;
+# golang images set `local`), is left alone, so CI, which installs that minor,
+# runs exactly as before. A `go` line without a patch (`go 1.27`) pins the
+# first release of that minor; an unreadable go.mod pins nothing.
+ifneq ($(OS),Windows_NT)
+ifeq ($(origin GOTOOLCHAIN),undefined)
+ifeq ($(shell go env GOTOOLCHAIN 2>/dev/null),auto)
+GO_MOD_VERSION := $(shell sed -n 's/^go //p' go.mod 2>/dev/null)
+GO_LOCAL_VERSION := $(shell GOTOOLCHAIN=local go env GOVERSION 2>/dev/null)
+GO_PIN_TOOLCHAIN := $(shell echo "$(GO_LOCAL_VERSION) go$(GO_MOD_VERSION)" | \
+	awk '{ mv = $$2; if (mv ~ /^go[0-9]+\.[0-9]+$$/) mv = mv ".0"; \
+	if (mv !~ /^go[0-9]+\.[0-9]+\.[0-9]+$$/ || $$1 !~ /^go[0-9]+\.[0-9]+/) exit; \
+	split(substr($$1, 3), l, "."); split(substr(mv, 3), m, "."); \
+	if (l[1] > m[1] || (l[1] == m[1] && l[2] > m[2])) print mv }')
+ifneq ($(GO_PIN_TOOLCHAIN),)
+export GOTOOLCHAIN := $(GO_PIN_TOOLCHAIN)
+endif
+endif
+endif
+endif
+
+default: help
+
+tools: ## install tools for developing yorkie
+	go install github.com/bufbuild/buf/cmd/buf@v1.28.1
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10
+	go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+	go install github.com/sudorandom/protoc-gen-connect-openapi@v0.5.5
+
+proto: ## generate proto files
+	buf generate
+
+build: ## builds an executable that runs in the current environment
+	CGO_ENABLED=0 go build -o $(EXECUTABLE) -ldflags "${GO_LDFLAGS}" ./cmd/yorkie
+
+build-binaries: ## builds binaries to attach a new release
+	rm -rf binaries
+	./build/build-binaries.sh $(YORKIE_VERSION) "$(GO_LDFLAGS)"
+
+fmt: ## applies format and simplify codes
+	gofmt -s -w $(GO_SRC)
+
+# Every build tag, on linux/amd64 like go fix, so the tag-gated tests are
+# linted too. `|| exit 1` because a failed substitution would otherwise lint
+# with no tags and pass.
+lint: ## runs the golang-ci lint, checks for lint violations
+	@# Warns, never fails, when this clone's git hooks are missing or stale.
+	@bash scripts/setup.sh --check || true
+	@tags="$$(scripts/go-build-tags.sh)" || exit 1; \
+	GOOS=linux GOARCH=amd64 golangci-lint run --timeout 5m --build-tags "$$tags" ./...
+
+# The gate a commit has to pass before it is pushed, and the one `.githooks/`
+# calls. Deliberately the lanes that need no service: `make test` needs
+# MongoDB, so the integration lane stays in CI where a container is already
+# up. Keep it in step with the "verification command" named in
+# docs/design/agent-command-verbs.md §4c.
+#
+# The three autonomous fixer prompts (`agent-fix.yml`, `agent-iterate-ci.yml`,
+# `agent-review-panel.yml`) call this target, so a lane added here is one they
+# all gain — which is the point of them naming a target rather than a list.
+verify: lint verify-license verify-modernize ## runs the checks a commit must pass: lint, licence headers, go fix, unit tests
+	go test ./...
+
+# The toolchain's own go fix modernizers, under every build tag found in the
+# tree, so a Go upgrade cannot leave old idioms behind unnoticed.
+verify-modernize: ## checks go fix has nothing left to rewrite under any build tag
+	@scripts/go-fix.sh check
+
+modernize: ## applies go fix under every build tag until nothing is left
+	@scripts/go-fix.sh apply
+
+# Node is not otherwise needed to build or test this repository, so the skip
+# is announced rather than silent. `.githooks/pre-push` refuses outright —
+# there, nothing reads the line.
+verify-license: ## checks every Go file carries the Apache 2.0 header
+	@if command -v node >/dev/null 2>&1; then \
+		node scripts/verify-license.mjs; \
+	else \
+		echo "[verify:license] SKIPPED - node not found; the Docs workflow still checks this."; \
+	fi
+
+coverage: ## runs coverage tests
+	go clean -testcache
+	go test -tags integration -race -coverpkg=./... -coverprofile=coverage.txt -covermode=atomic ./...
+	go tool cover -html=coverage.txt
+	rm -f coverage.txt
+
+test: ## runs integration tests that require local applications such as MongoDB
+	go clean -testcache
+	go test -tags integration -race ./...
+
+test-complex: ## runs complex tests that take a long time
+	go clean -testcache
+	go test -tags complex -race -v ./test/complex/...
+
+bench: ## runs benchmark tests
+	go clean -testcache
+	rm -f pipe output.txt mem.prof cpu.prof bench.test
+	mkfifo pipe
+	tee output.txt < pipe &
+	go test -tags bench -benchmem -bench=. ./test/bench -memprofile=mem.prof -cpuprofile=cpu.prof > pipe
+	rm -f pipe
+
+docker: ## builds docker images with the current version and latest tag
+	docker buildx build --push --platform linux/amd64,linux/arm64,linux/386 -t yorkieteam/yorkie:$(YORKIE_VERSION) -t yorkieteam/yorkie:latest .
+
+docker-latest: ## builds docker images with latest tag
+	docker buildx build --push --platform linux/amd64,linux/arm64,linux/386 -t yorkieteam/yorkie:latest .
+
+start: ## runs the server in the background and redirects output to a log file
+	CGO_ENABLED=0 go build -o $(EXECUTABLE) -ldflags "${GO_LDFLAGS}" ./cmd/yorkie
+	./bin/yorkie server --mongo-connection-uri mongodb://localhost:27017 --pprof-enabled > yorkie-server.log 2>&1 &
+	@echo "Server is running in background. Check logs in yorkie-server.log"
+	@echo "To stop the server, run: pkill -f 'yorkie server'"
+
+stop: ## stops the server
+	@echo "Stopping server..."
+	@pkill -f 'yorkie server'
+	@echo "Server stopped."
+
+swagger: ## runs swagger-ui with the yorkie api docs
+	docker run -p 3000:8080 \
+  		-e URLS="[ \
+			{ url: 'docs/yorkie/v1/admin.openapi.yaml', name: 'Admin' }, \
+			{ url: 'docs/yorkie/v1/resources.openapi.yaml', name: 'Resources' }, \
+			{ url: 'docs/yorkie/v1/yorkie.openapi.yaml', name: 'Yorkie' }  \
+		]" \
+		-v `pwd`/api/docs:/usr/share/nginx/html/docs/ \
+  		swaggerapi/swagger-ui
+
+help:
+	@echo 'Commands:'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "    %-20s %s\n", $$1, $$2}'
+	@echo
+
+.PHONY: tools proto build build-binaries fmt lint verify verify-license verify-modernize modernize test test-complex coverage bench docker docker-latest start stop swagger help
